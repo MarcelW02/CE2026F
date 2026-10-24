@@ -1,18 +1,24 @@
-"""Capability-aware settings; documented and probed on 2026-09-08.
+"""Final-project model controls and standard global token rates.
 
-Sampling controls depend on BOTH model and reasoning effort. Unsupported settings
-raise locally, before a paid request.
+The project adds GPT-6 Luna without changing settings for other assignments.
+Unsupported settings raise locally, before a paid request. Rates and Decisions
+availability were checked against official OpenAI documentation on 2026-10-22.
 """
 import math
 
-COURSE_MODELS = ("gpt-5.6-luna", "gpt-5.4-nano", "gpt-5-mini", "gpt-5-nano", "gpt-4o-mini")
+COURSE_MODELS = ("gpt-5.6-luna", "gpt-5.4-nano", "gpt-5-mini", "gpt-5-nano", "gpt-4o-mini", "gpt-6-luna")
 EFFORTS = {"gpt-5.6-luna": ("none", "low", "medium", "high", "xhigh", "max"),
            "gpt-5.4-nano": ("none", "low", "medium", "high", "xhigh"),
            "gpt-5-mini": ("minimal", "low", "medium", "high"),
-           "gpt-5-nano": ("minimal", "low", "medium", "high"), "gpt-4o-mini": ()}
+           "gpt-5-nano": ("minimal", "low", "medium", "high"), "gpt-4o-mini": (),
+           "gpt-6-luna": ("none", "low", "medium", "high", "xhigh", "max")}
+# Input, cached-input and output USD per million tokens, respectively.
 PRICES = {"gpt-5.6-luna": (.20, .02, 1.20), "gpt-5.4-nano": (.20, .02, 1.25),
           "gpt-5-mini": (.25, .025, 2.), "gpt-5-nano": (.05, .005, .40),
-          "gpt-4o-mini": (.15, .075, .60)}
+          "gpt-4o-mini": (.15, .075, .60), "gpt-6-luna": (.10, .01, .50)}
+CACHE_WRITE_PRICES = {"gpt-6-luna": .125}  # Default 30-minute Responses cache.
+DECISION_PRICES = {"gpt-6-luna": .10}  # All Decisions input; no output/cache fee.
+STANDARD_INPUT_LIMIT = 272000
 
 
 def settings(model="gpt-5-nano", **changes):
@@ -40,11 +46,11 @@ def validate_settings(config):
         raise ValueError(f"reasoning.effort for {model}: {EFFORTS[model] or 'not supported; use None'}")
     verbosity = config["verbosity"]
     if verbosity not in (None, "low", "medium", "high") or (model == "gpt-4o-mini" and verbosity is not None):
-        raise ValueError("text.verbosity supports low/medium/high on the GPT-5 course models; use None for GPT-4o mini.")
+        raise ValueError("text.verbosity supports low/medium/high on supported reasoning models; use None for GPT-4o mini.")
     cap = config["max_output_tokens"]
     if type(cap) is not int or not 16 <= cap <= 4096:
         raise ValueError("The classroom output budget is 16–4096 tokens (not the model's maximum).")
-    sampling_ok = model == "gpt-4o-mini" or (model in ("gpt-5.6-luna", "gpt-5.4-nano") and effort == "none")
+    sampling_ok = model == "gpt-4o-mini" or (model in ("gpt-5.6-luna", "gpt-5.4-nano", "gpt-6-luna") and effort == "none")
     for name, high in (("temperature", 2), ("top_p", 1)):
         value = config[name]
         if value is not None:
@@ -61,6 +67,6 @@ def capability_rows():
     return [dict(model=m, reasoning_effort=list(EFFORTS[m]) or "unsupported",
                  verbosity="unsupported" if m == "gpt-4o-mini" else "low / medium / high",
                  sampling=("temperature / top_p" if m == "gpt-4o-mini" else
-                           "only with effort=none" if m in ("gpt-5.6-luna", "gpt-5.4-nano") else "unsupported"),
+                           "only with effort=none" if m in ("gpt-5.6-luna", "gpt-5.4-nano", "gpt-6-luna") else "unsupported"),
                  structured_outputs=True, classroom_output_tokens="16–4096",
                  input_usd_per_million=PRICES[m][0], output_usd_per_million=PRICES[m][2]) for m in COURSE_MODELS]

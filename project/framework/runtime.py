@@ -41,6 +41,10 @@ class ModelAPI:
     def json(self, config, instructions, payload, schema, label):
         label = dict(label, case_id=self.__case_id, episode=self.__episode)
         return self.__api.json(config, instructions, payload, schema, label)
+    def decide(self, payload, questions, label, *, task=None, model="gpt-6-luna"):
+        """Make a typed decision in this episode's same accounted request ledger."""
+        label = dict(label, case_id=self.__case_id, episode=self.__episode)
+        return self.__api.decide(payload, questions, label, task=task, model=model)
     def usage(self):
         rows = [r for r in self.__api.records if r["label"].get("episode") == self.__episode]
         return copy.deepcopy(self.__api.usage(rows))

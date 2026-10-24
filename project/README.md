@@ -9,6 +9,16 @@ your submitted source on public and hidden cases for a score out of 100.
 **Final submission: December 21, 2026 (KST).** The exact deadline time will be
 announced separately.
 
+**All final presentations are online via Zoom; no on-site attendance is required.**
+Read the [October 22 project updates](../README.md#project-updates) for the
+current model/API choices and common clarifications.
+
+**October 22 update:** `gpt-6-luna` is now allowed for Responses, and the optional
+Decisions API is available through `api.decide`. Get the updated project release
+before using these methods; keep the protected framework unchanged. Your own
+previously issued course API key is the setup key. The default starter and all
+existing scoring/case rules remain the same. See section 4 for the two interfaces.
+
 The starter is runnable. You can begin with prompts and configuration, then
 extend routing, memory or the action loop as your experiments identify failures.
 
@@ -186,26 +196,97 @@ Your `solve(world, api, config, route_fn)` receives two controlled interfaces:
 | `world.call(tool, **arguments)` | Run one local tool. |
 | `world.batch(actions)` | Run independent tools using three common slots. |
 | `api.json(config["model_settings"], instructions, payload, schema, label)` | Make a schema-constrained model request and record its usage/cost. |
-| `api.usage()` | Read this episode's measured model usage. |
+| `api.decide(payload, questions, label, *, task=None, model="gpt-6-luna")` | Ask named choice/predicate/score questions and record their usage/cost. |
+| `api.usage()` | Read this episode's usage across both endpoints. |
 
-All model calls must go through `api.json`. Do not create a separate client or
-bypass the usage ledger. The course adapter accepts these model settings:
+All model requests must use `api.json` for Responses or `api.decide` for
+Decisions. They share the existing spending/call guards and ledger. Do not create
+a separate client, bypass accounting or automatically retry/switch endpoints after
+an API error. Responses through `api.json` supports these settings:
 
 | Model | `EFFORT` values | `VERBOSITY` | Sampling controls |
 |---|---|---|---|
+| `gpt-6-luna` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `low`, `medium`, `high`, or `None` | Only with `EFFORT="none"`. |
 | `gpt-5.6-luna` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `low`, `medium`, `high`, or `None` | Only with `EFFORT="none"`. |
 | `gpt-5.4-nano` | `none`, `low`, `medium`, `high`, `xhigh` | `low`, `medium`, `high`, or `None` | Only with `EFFORT="none"`. |
 | `gpt-5-mini` | `minimal`, `low`, `medium`, `high` | `low`, `medium`, `high`, or `None` | Keep both `None`. |
 | `gpt-5-nano` | `minimal`, `low`, `medium`, `high` | `low`, `medium`, `high`, or `None` | Keep both `None`. |
 | `gpt-4o-mini` | `None` | `None` | Supported. |
 
-The classroom output cap is 16–4096 tokens. Use `None` for optional verbosity or
+To try `gpt-6-luna` through Responses, set `MODEL="gpt-6-luna"` in
+`solution/config.py`; choose its supported controls from this table.
+
+The Responses classroom output cap is 16–4096 tokens. Use `None` for optional verbosity or
 sampling controls where the table permits it; choose a listed `EFFORT` value.
-The string `"none"` is a reasoning-effort value for the first two models. Where
+The effort string `"none"` and Python `None` are different values. Where
 sampling is supported, set `TEMPERATURE` (0–2) or `TOP_P` (0–1), not both.
 Unsupported combinations fail locally before a paid request. See
 [`framework/settings.py`](framework/settings.py) for the exact adapter and
 accounting prices. Compare measured task outcomes and cost when changing models.
+
+### Use Decisions for a typed decision
+
+`api.decide` accepts observed text or a JSON-serializable payload and a list of
+named questions. It returns a dictionary containing the raw typed `answers` and
+usage. Only `gpt-6-luna` is supported on this endpoint. Do not pass Responses
+controls such as effort, verbosity, temperature or an output-token cap.
+Use a model-enabled `ARCHITECTURE`, such as `hybrid_single`, when making model
+requests. The `rules` setting selects a zero-API run and passes `api=None`.
+
+| Question type | Definition | Main answer field |
+|---|---|---|
+| `choice` | Supply distinct `choices` with `value` and `description`. | `choice`: one supplied value, plus probabilities/confidence. |
+| `predicate` | Ask whether an observed condition holds. | `probability`: the model's estimate from 0 to 1. |
+| `score` | Supply ordered `levels` with `label` and `description`. | `score`: a probability-weighted level index, which may be fractional. |
+
+For example, inside a custom `solve()` after reading evidence, ask about current
+observed offers. Here `trip_state` contains your interpreted current requirements
+and `offers` comes from an actual search:
+
+```python
+if len(offers) >= 2:
+    decision = api.decide(
+        payload={"observation": world.observe(),
+                 "trip_state": trip_state, "offers": offers},
+        questions=[{
+            "name": "offer_id", "type": "choice",
+            "instructions": "Propose an observed offer for the current trip. "
+                            "Consider the supplied requirements and fare terms.",
+            "choices": [{"value": offer["id"], "description": str(offer)}
+                        for offer in offers],
+        }],
+        label={"role": "offer_selector"},
+    )
+    answer = next(row for row in decision["answers"]
+                  if row.get("name") == "offer_id")
+    if answer.get("type") == "choice":
+        proposed_id = answer["choice"]
+```
+
+This proposes an ID, not a booking. Check the proposal against the current
+requirements, then use normal tools and verify their results. Read the selected
+`choice` value rather than treating a probability as an ID. Probabilities and
+confidence are model estimates, not proof of eligibility, authorization or a
+successful booking. The optional `task` tag labels the local request record; it
+does not store conversation memory or guarantee prompt-cache reuse.
+
+`solution/policy.py` also provides
+`choose_offer_with_decisions(observation, trip_state, offers, api)` as an optional
+example for a custom loop. The default starter does not call it. Compare a
+Decisions-based policy with a Responses policy on the same cases and observed
+inputs; a different endpoint, model or context design can change the result.
+For the underlying answer types, see the
+[official OpenAI Decisions documentation](https://developers.openai.com/api/docs/guides/decisions).
+
+Current project accounting for `gpt-6-luna` Responses uses USD 0.10 per million
+regular input tokens, USD 0.01 cached input, USD 0.125 cache writes when reported,
+and USD 0.50 output. A cache-write rate replaces the regular-input rate for those
+tokens; it is not an added fee on top of that rate. Decisions uses USD 0.10 per
+million input tokens, including cached input, with no separate output or cache
+fee. These are the published accounting rates; compare complete-task outcomes
+and both cost views rather than assuming the new model or endpoint must win.
+
+### Travel tools
 
 | Tool | Virtual duration | Main arguments and result |
 |---|---:|---|
@@ -409,15 +490,17 @@ request counts, including specialists and repeated attempts. Local numerical
 search is free.
 
 For grading, count **all input tokens, including cached tokens**, at the model's
-published uncached-input rate, and output tokens at its output rate. Sum this
-amount across every request. The same calculation applies to the solver and
+published uncached-input rate. For Responses, also count output tokens at its
+output rate. Decisions counts input only, with no separate output fee. Sum this
+amount across every request on both endpoints. The same calculation applies to the solver and
 recorded benchmark. This keeps cache hits from changing a score when two runs
 use the same tokens.
 
 ```text
-grading cost per request =
+Responses grading cost =
     (all input tokens × uncached-input price per million
      + output tokens × output price per million) / 1,000,000
+Decisions grading cost = all input tokens × 0.10 / 1,000,000
 ```
 
 | Evaluation | Fixed grading-cost reference B | Recorded API cost estimate |
@@ -426,7 +509,8 @@ grading cost per request =
 | Final Public + Hidden: 96 episodes | USD 0.03851960 | USD 0.01655132 |
 
 The grading cost is a common comparison measure, not an actual invoice. Reports
-also retain cached-token usage and the API cost estimate with cache discounts.
+also retain cached-token usage and the API cost estimate, including applicable
+cache-read/write rates for Responses.
 That separate estimate shows the cost of the observed run but does not determine
 the efficiency score. See [`framework/settings.py`](framework/settings.py) for
 the accounting rates and [`framework/fp_baseline.py`](framework/fp_baseline.py)
@@ -500,6 +584,11 @@ Final grading reruns your three frozen solution files on all
 evaluation. No best repeat or best bank is selected.
 
 ## 9. Leaderboard and help
+
+**Final presentations: online via Zoom for every team.** Follow the course
+schedule for your presentation date and session; the Zoom link and joining
+instructions will be announced separately. December 21 is the source-submission
+deadline, not an announcement of the presentation date.
 
 Staff will publish interim results in a shared Google spreadsheet so teams can
 see their own and other teams' scores. The leaderboard will be created later,

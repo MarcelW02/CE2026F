@@ -10,6 +10,10 @@ result. The final score combines task outcomes and API efficiency, out of 100.
 **Final submission: December 21, 2026 (KST).** The exact deadline time will be
 announced separately.
 
+**All final presentations are online via Zoom.** No on-site attendance is required.
+See the [October 22 project updates](#project-updates) for presentation details
+and answers about models, hidden cases, implementation and evaluation.
+
 **Start in [`project/`](project/).** It contains the complete runnable starter,
 public data, tools and evaluator. Install the listed dependencies and follow
 the setup steps below to run it.
@@ -142,3 +146,80 @@ not leaderboard rank.
 
 `CE2026F_A3_Documents.zip` is the existing Assignment 3 document collection.
 It is independent of this final project and is not needed by the travel simulator.
+
+## Project updates
+
+October 22, 2026.
+
+**Latest October 22 update: Decisions and `gpt-6-luna` are now supported.**
+Refresh your project from the updated release before using them; keep the shared
+framework unchanged. Use your own previously issued course API key. The default
+starter remains `gpt-5.6-luna`, and both new options are optional. This update
+supersedes the earlier guidance that excluded Decisions and Luna 6.0.
+
+These clarifications explain the project contract and the presentation format.
+They add no required implementation or grading criterion. See the
+[student guide](project/README.md) for setup, tools, scoring and submission.
+
+**Final presentations are online via Zoom for all teams.** There are no onsite
+presentations. Follow the course schedule for your presentation date and session;
+the Zoom link and joining details will be announced later. The final source ZIP
+is due **December 21, 2026 (KST)**. Its exact deadline time and submission channel
+will be announced separately. December 21 is the source-submission deadline,
+not an announcement of the presentation date.
+
+- **Allowed models and API.** Responses requests through `api.json` accept
+  `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.4-nano`, `gpt-5-mini`, `gpt-5-nano` and
+  `gpt-4o-mini`. Decisions requests through `api.decide` use `gpt-6-luna` and
+  return `choice`, `predicate` or `score` answers. Use each endpoint's documented
+  controls; Decisions does not take Responses effort or sampling settings. Both
+  methods share the call/dollar guards and usage ledger. Do not create a separate
+  client, edit protected framework files, or add automatic retries or fallback.
+  The [student guide](project/README.md#4-use-the-supplied-tools-and-api) shows
+  the wrapper and an optional example. A model's confidence is not proof that a
+  choice is correct, so keep normal booking and status verification.
+
+- **Hidden cases and parsing.** Hidden evaluation follows the published tools,
+  schemas and grading criteria, but is not limited to rewording public cases.
+  Amounts, requirements, combinations and event timings can vary within that
+  contract. Use source catalogs, document links and tool replies. Treat offer
+  IDs, booking IDs, approval codes and evidence codes as exact observed strings;
+  do not assume a fixed prefix, number of digits or length. General local parsers
+  are allowed. Future event definitions and case-ID answer tables cannot guide
+  solver actions. There is no extra hidden criterion.
+
+- **Architecture and memory.** You may keep the starter, use one or several model
+  roles, or build a general symbolic policy. There is no agent-count bonus.
+  Improve observed behavior and cost. Submit only `solution/config.py`,
+  `solution/prompts.py` and `solution/policy.py`, packaged with `submit.py`.
+  Helpers stay inside those files, and travel actions use the supplied world
+  interface. A custom memory design or full loop rewrite is optional.
+
+- **What the score measures.** Evaluation checks booking state **and action
+  history**. A suitable final booking does not erase missed initial-booking
+  deadlines, duplicates or unsafe changes. Outcomes contribute up to 90 points,
+  with up to 10 more for API efficiency. Grading cost charges all input tokens,
+  including cached input, at the regular input rate. Responses also counts output
+  at its output rate; Decisions has no output fee. The separate API cost estimate
+  remains visible.
+  Cache discounts do not improve the grade. API efficiency reaches its maximum
+  at or below the fixed benchmark cost; further savings do not add points.
+  Valid within-budget travel plans receive the same budget credit even if their
+  fares differ. See the [scoring explanation](project/README.md#7-understand-the-100-point-score)
+  for the formula and both cost views.
+
+- **Repair and API interruptions.** A bounded content-repair loop may make extra
+  `api.json` or `api.decide` requests to correct a content mistake; every request
+  counts toward the existing limits and cost. Actual API timeouts, connection,
+  authentication or rate-limit failures are different: stop the run, preserve
+  partial records and resolve the cause before a fresh run. No automatic paid
+  retry or engine fallback is provided. A simulated missing booking reply uses
+  the original request key and `status` to check whether the booking committed.
+
+- **Development checks.** Improve on dev and optional local cases, then test the
+  same frozen source and settings on cases kept aside during tuning. Keep local
+  case text, fields and event effects consistent. An old result is evidence for
+  the code that produced it, not for later edits. Compare difficulty-level
+  outcomes, failures and grading cost. Public and self-authored cases can be
+  overfit; small checks do not prove broad generalization. Final grading reruns
+  the frozen source on the published public-plus-hidden protocol.

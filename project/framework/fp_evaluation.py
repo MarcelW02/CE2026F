@@ -104,7 +104,7 @@ def evaluate_travel(cases, api, config, repeats=1, route_fn=travel_route, concur
         # Count submitted attempts while retaining actual completed records.
         # Missing responses cannot be reported as free calls or a numeric cost.
         result["usage"]["calls"] += pending
-        for key in ("input_tokens", "cached_tokens", "output_tokens", "reasoning_tokens", "estimated_usd", "grading_usd", "actual_request_seconds"):
+        for key in ("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens", "estimated_usd", "grading_usd", "actual_request_seconds"):
             result["usage"][key] = None
     infrastructure = any(r["error_type"] in ("APITimeoutError", "APIConnectionError", "AuthenticationError", "RateLimitError", "BudgetExceeded") for r in rows)
     result["complete"] = len(rows) == len(jobs) and not infrastructure and not pending and not pending_observed_after_solver
@@ -178,7 +178,11 @@ def rescore_travel_result(recorded):
         costs = [grading_cost_from_record(request) for request in requests]
         consistent = all(cost is not None for cost in costs)
         for key in ("input_tokens", "output_tokens"):
-            if consistent and usage.get(key) != sum(request[key] for request in requests):
+            counts = [request.get(key) for request in requests]
+            expected = sum(counts) if all(type(value) is int and value >= 0 for value in counts) else None
+            # Decisions can report input-only usage. Preserve an unreported
+            # output count while pricing its documented input-only endpoint.
+            if consistent and usage.get(key) != expected:
                 consistent = False
         usage["grading_usd"] = sum(costs) if consistent else None
     else:
@@ -255,9 +259,12 @@ def combine_travel_results(public, hidden):
     result["complete"]=public["complete"] and hidden["complete"]
     result["status"]="complete" if result["complete"] else "interrupted"
     result.update(travel_outcome_summary(result["rows"]))
-    for key in ("calls","input_tokens","cached_tokens","output_tokens","reasoning_tokens","estimated_usd","grading_usd","actual_request_seconds"):
+    for key in ("calls","input_tokens","cached_tokens","cache_write_tokens","output_tokens","reasoning_tokens","estimated_usd","grading_usd","actual_request_seconds"):
         a,b=public["usage"].get(key),hidden["usage"].get(key)
         result["usage"][key]=a+b if a is not None and b is not None else None
+    endpoints = set(public["usage"].get("endpoint_counts", {})) | set(hidden["usage"].get("endpoint_counts", {}))
+    result["usage"]["endpoint_counts"] = {name:public["usage"].get("endpoint_counts", {}).get(name, 0)
+        + hidden["usage"].get("endpoint_counts", {}).get(name, 0) for name in endpoints}
     result["usage"]["pending_count"] = public["usage"].get("pending_count", 0) + hidden["usage"].get("pending_count", 0)
     result["pending_requests"] = public.get("pending_requests", 0) + hidden.get("pending_requests", 0)
     result["pending_observed_after_solver"] = max(public.get("pending_observed_after_solver", 0), hidden.get("pending_observed_after_solver", 0))

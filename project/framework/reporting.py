@@ -33,6 +33,8 @@ def save_report(directory, report, key=None):
     if usage:
         contents += "<h2>Model usage and cost</h2><p>Estimated API cost (with reported cache discounts): USD " + esc(usage.get("estimated_usd")) + ". Cache-neutral grading cost: USD " + esc(usage.get("grading_usd")) + ". These are separate accounting values; grading cost is not an invoice.</p>"
         contents += "<p>Model requests: " + esc(usage.get("calls")) + "; input tokens: " + esc(usage.get("input_tokens")) + "; cached input: " + esc(usage.get("cached_tokens")) + "; output tokens: " + esc(usage.get("output_tokens")) + ".</p>"
+        if usage.get("endpoint_counts"):
+            contents += "<p>Requests by endpoint: " + esc(json.dumps(usage["endpoint_counts"], sort_keys=True)) + ". Cache-write input tokens: " + esc(usage.get("cache_write_tokens")) + ". Unreported token fields remain unknown. Decisions uses its input-only rate; Responses uses its model's input and output rates.</p>"
     from .fp_cases import FP_OUTCOME_POINTS, FP_EFFICIENCY_MAX
     points = grade["criterion_points"] if grade else result.get("criterion_points", {})
     if points:

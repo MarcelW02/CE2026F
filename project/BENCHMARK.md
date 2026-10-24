@@ -24,8 +24,9 @@ Hidden cases use this same contract and add no secret scoring criterion. Public
 cases can be overfit; no finite authored bank establishes performance on arbitrary
 real travel. The [100-point rubric](README.md#7-understand-the-100-point-score)
 uses 90 outcome points plus up to 10 API-efficiency points under
-`travel-score-2026f-v3-100`. Grading cost counts every input token, including
-cached input, at the model's uncached-input rate, plus output at its output rate.
+`travel-score-2026f-v3-100`. For Responses, grading cost counts every input token, including cached input,
+at the model's uncached-input rate, plus output at its output rate. Decisions
+uses its input-only rate for every input token and has no separate output fee.
 The report separately shows the usage-based API cost estimate with cache
 discounts. The grading measure is not an actual invoice.
 
