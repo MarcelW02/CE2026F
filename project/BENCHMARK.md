@@ -11,10 +11,11 @@ are not scoring criteria.
 | Set | Distinct cases | Use |
 |---|---:|---|
 | Dev | 9: three per difficulty | Start, debug and compare small changes. |
-| Public | 24: eight per difficulty | Two runs per case; provisional public grade. |
-| Hidden evaluation | 24: eight per difficulty | Two runs per case, combined with Public for final grading. |
+| Public | 24: eight per difficulty | Two runs per case; local development score. |
+| Hidden evaluation | 24: eight per difficulty | Two runs per case, combined with Public for every official staff grade. |
 
-Final grading uses all 96 episodes from one frozen submitted solution. Each
+Every official staff grade, including interim leaderboard entries, uses all 96
+episodes from one frozen submitted solution. Each
 team gets the same cases and tools in separate worlds. Local test cases you
 create are optional and do not enter the official grade.
 
@@ -29,6 +30,69 @@ at the model's uncached-input rate, plus output at its output rate. Decisions
 uses its input-only rate for every input token and has no separate output fee.
 The report separately shows the usage-based API cost estimate with cache
 discounts. The grading measure is not an actual invoice.
+
+## November 3 planning revision: `travel-2026f-v9`
+
+This is a case update from the distributed v8 release. Basic keeps its existing
+stable tasks. Reactive and Forecast change offer prices, fare terms, hold
+lifetimes, availability and combinations of later changes. Tools, action durations, first-booking
+obligations, the 100-point score and fixed API-cost allowances are unchanged.
+The update tests useful preparation and recovery, with concise current evidence.
+
+| Decision | Why a local improvement may be insufficient |
+|---|---|
+| Choose a recoverable first ticket | A low purchase price can leave a large cancellation fee. Compare retained fees plus the replacement, not just today's price. |
+| Remember an announced opportunity | Inventory can open and close without a new alert. Waiting until the current trip fails may leave no replacement to buy. |
+| Reserve before committing | An unpaid hold can protect a backup while the original trip is still valid. Cancelling or paying immediately is a different decision. |
+| Separate current and conditional approval | Emergency funding may be promised only if a disruption is confirmed. You may prepare an affordable future option, but a new payment must fit the allowance actually in force. |
+| Use the applicable forecast | A later service is not necessarily safe: compare its mode, exposure, transfer and arrival margin with the current warning. |
+| Update the current task | Read linked facts; replace only the fields a new instruction changes; verify that a previous booking still fits. |
+
+### Example: prepare now, pay only after approval
+
+Suppose the current extra-spending limit is USD 150. Finance promises a total
+USD 190 ceiling if an actual disruption is confirmed. A possible replacement
+costs USD 170, and cancelling the first ticket would retain USD 10. That exchange
+would cost USD 180 in total: too much now, but affordable after the conditional
+ceiling is activated. The two ceilings are alternatives, not amounts to add.
+
+If replacement sales close before the weather report arrives, a valid unpaid
+hold may preserve the choice. Keep the original ticket while it still works.
+After new information arrives, use the active spending limit and current trip
+requirements to decide whether to cancel and confirm the replacement. A false
+alarm does not activate emergency funds. Leave enough hold time for source
+reads, cancellation and confirmation; starting before expiry is not enough.
+
+This is an illustrative pattern, not a required action sequence. A different
+valid plan earns the same outcome credit. Current tool replies provide actual
+hold expiry, fare terms and booking state. Hold duration is a case parameter;
+do not assume the duration from an earlier case or release. Your policy must
+verify the returned expiry.
+
+### Example: a cheaper first fare can prevent recovery
+
+With an approved recovery ceiling of USD 190, a USD 170 replacement plus a
+USD 45 retained fee will not fit. The same replacement plus a USD 10 fee fits.
+A fully refundable first fare can still be above today's approved limit. Use
+ordinary Python to compare these amounts after interpreting the relevant terms.
+
+Basic remains an approachable starting point. Reactive includes ordinary updates
+as well as combined timing and repair decisions. Forecast combines early booking,
+uncertain delay and remaining recovery choices. Not every case contains every
+complication, and unrelated draft text is not added to every advanced task.
+
+The nine Dev cases and 24 Public cases expose these capabilities. Hidden cases
+vary their wording, numbers and combinations under the same contract. All
+current facts and conditional approval needed for preparation are available
+through arrived requests and linked sources; later events remain unavailable
+until they occur. No case ID or family name authorizes a prediction of the future.
+
+Keep earlier scores as earlier-version records. After updating, test and resubmit
+your solution on this release. All official entries use the same current bank;
+an old ZIP's diagnostic rerun does not remove the opportunity to adapt. The
+benchmark and scoring contract are fixed for this release. Necessary correctness
+fixes will be announced and applied equally; successful efficient solutions are
+not a reason to increase difficulty again.
 
 ## Two clocks and scheduled changes
 
@@ -71,12 +135,12 @@ service obligation.
 | Situation | What can change | What your assistant should handle |
 |---|---|---|
 | Meeting update | The client meeting moves; hotel check-in or lunch may have another time. | Use the latest applicable client deadline, including the onward transfer. |
-| Budget update | The limit for new spending falls. | Apply the new limit to new commitments; earlier approved purchases remain approved. |
+| Budget update | The limit for new spending falls before a possible exchange. | Include retained fees and the announced recovery fare; earlier approved purchases remain approved. |
 | Temporary preference | The traveler prefers a different mode for this trip. | Keep current-trip instructions separate from defaults for later journeys. |
 | Conditional waiver | The hotel publishes a new evidence procedure or source version. | Use the current evidence type, literal code and version before the cutoff. An already accepted claim remains accepted. |
-| Quote expiry | Another buyer takes unheld inventory or an offer closes. | Search current offers and respect hold expiry; an old quote alone cannot reserve a seat. |
+| Quote expiry | Recovery sales can close before a scheduled client clarification. | Use the announced window and preserve a suitable option; an old quote alone cannot reserve a seat. |
 | Confirmation interruption | The provider commits a booking but its reply is lost. | Check the same request key before starting another booking. |
-| Transfer update | The journey from the terminal to the client changes. | Refresh the guide; terminal arrival and client arrival are different. |
+| Transfer update | An announced roadwork bound is followed by a current transfer revision. | Prepare before recovery sales close; refresh the guide and compare client arrival, not just the terminal clock. |
 | Traveler scope | Access or carrier rules change for the lead traveler. | Apply them to the current replacement, including one already booked; preserve the colleague's separate booking. |
 
 Cases can combine later restrictions with an earlier situation. A new notice may
@@ -91,15 +155,16 @@ minute 24 and finish by minute 36. Read the applicable forecast before choosing
 a fare. A higher price may buy useful flexibility, but the most expensive fare
 is not automatically suitable.
 
-The published public cases cover four integrated situations, each with a delay
-and a false-alarm outcome:
+The Public bank covers four planning situations, each with a disruption and a
+false-alarm outcome. Paired situations share the same evidence before resolution;
+the policy cannot know the outcome from that evidence.
 
-| Situation | Combined changes |
+| Situation | Decisions that interact |
 |---|---|
-| Flight watch and access | The flight warning rises, followed by an earlier meeting, step-free access and a current carrier rule. |
-| Rail watch and carrier | The rail warning falls, while the meeting, access and permitted carrier also change. |
-| Coach watch and transfer | The coach warning rises; later meeting/carrier rules and onward transfers can change. |
-| Changed watch and trip scope | The warning shifts from rail to flight, followed by current-trip preference, access, carrier and spending changes. |
+| Backup and arrival margin | Recovery inventory closes before resolution; compare the predicted delay with the margin of later services. |
+| Conditional recovery budget | A promised emergency ceiling can fund a later exchange, but only after it becomes active; retained fees still count. |
+| Revised watch and eligibility | A changed warning, current carrier/access conditions and conditional funding constrain which backup is useful. |
+| Transfer and backup | Updated onward transfers can make an apparently suitable terminal arrival miss the client time. |
 
 A forecast percentage is a warning about a stated journey and mode. It is not
 an already observed delay, and the authored outcomes are not random draws from

@@ -14,6 +14,14 @@ announced separately.
 See the [October 22 project updates](#project-updates) for presentation details
 and answers about models, hidden cases, implementation and evaluation.
 
+**November 3 benchmark update — `travel-2026f-v9`:** Basic stays a stable
+starting point. Reactive and Forecast cases strengthen fare-change planning,
+announced booking windows and preparation for uncertain disruptions. Some
+current facts are supplied by linked sources. The tools, 100-point formula,
+fixed cost allowances and three submitted files stay the same. Read the
+[benchmark guide](project/BENCHMARK.md) and the update notes below before running
+your solution on the new cases.
+
 **Start in [`project/`](project/).** It contains the complete runnable starter,
 public data, tools and evaluator. Install the listed dependencies and follow
 the setup steps below to run it.
@@ -98,9 +106,11 @@ cases: nine dev and 24 public. Local tests and dev runs report outcomes out of 9
 grading cost and estimated API cost. Grading charges cached input at the regular
 input rate so a cache discount does not change your score.
 
-Public evaluation runs 24 cases twice and gives a provisional public score.
-Final grading reruns the frozen submitted source on 24 public plus 24 hidden
-cases, twice each: 96 episodes. Submit only the generated source ZIP, containing
+Local Public evaluation runs 24 cases twice and gives a provisional development
+score. All official staff grading, including interim leaderboard entries and
+final grading, reruns the frozen submitted source on 24 public plus 24 hidden
+cases, twice each: 96 episodes. A local Public score is not an official
+leaderboard score. Submit only the generated source ZIP, containing
 your three solution files and an automatic manifest. Your local test data is not
 part of the submission or official grading.
 
@@ -123,6 +133,8 @@ explains what can vary, how to test new wording or trip facts, and how to avoid
 building a solution that only recognizes known case IDs.
 
 Course staff will publish interim results in a shared Google spreadsheet.
+Each official entry uses the complete public-plus-hidden 96-episode evaluation;
+students' local Public runs remain development checks.
 The leaderboard will be created later, and its link will be added here.
 It will show total /100, each criterion, Basic /30, Reactive /30, Forecast /30,
 the shared API-efficiency score /10, full success, grading cost and estimated API
@@ -148,6 +160,41 @@ not leaderboard rank.
 It is independent of this final project and is not needed by the travel simulator.
 
 ## Project updates
+
+### November 3 benchmark update: v8 to v9
+
+This release updates the planning cases, not just their wording. Basic cases
+keep their existing tasks. Reactive and Forecast cases change combinations of
+offer prices, fare terms, hold lifetimes, booking windows and later updates.
+They ask your policy
+to preserve a feasible next step: include retained fees, prepare for a published
+recovery window, and use new evidence before making a dependent change. Some
+current requirements are split between the request and an explicitly linked
+source; a partial amendment leaves other requirements active.
+
+The [benchmark guide](project/BENCHMARK.md) gives the capabilities and examples.
+Dev and Public show the same kinds of decisions used in hidden evaluation.
+Tools, action durations, early-booking deadlines, allowed models, API accounting,
+the 100-point rubric, fixed cost allowances and the three editable files
+are unchanged. You can keep
+your existing implementation and improve it within those files.
+
+**Leaderboard protocol:** Official interim entries use Public plus Hidden,
+just like final grading: 96 episodes. Your local Public score is a development
+result, not an official leaderboard entry.
+
+Before updating, back up `solution/config.py`, `solution/prompts.py` and
+`solution/policy.py`. Get the updated release, restore your solution changes,
+and run the offline check and Dev cases again. Re-export any optional local
+cases whose version check fails. Update and resubmit your solution for this
+release; an old ZIP's diagnostic rerun is not a replacement for that opportunity.
+Earlier scores remain records of their earlier case bank and are not mixed with
+new scores. Every official entry uses the same current Public plus Hidden bank.
+
+This release fixes the benchmark and scoring contract for the project. A
+necessary correctness fix will be announced and applied equally. A high score
+from a valid, efficient implementation is not a reason to make the cases harder.
+No particular agent count or memory format is required.
 
 October 22, 2026.
 

@@ -16,8 +16,17 @@ current model/API choices and common clarifications.
 **October 22 update:** `gpt-6-luna` is now allowed for Responses, and the optional
 Decisions API is available through `api.decide`. Get the updated project release
 before using these methods; keep the protected framework unchanged. Your own
-previously issued course API key is the setup key. The default starter and all
-existing scoring/case rules remain the same. See section 4 for the two interfaces.
+previously issued course API key is the setup key. The default starter and scoring contract remain the same. See section 4 for the two interfaces.
+
+**November 3 benchmark update — `travel-2026f-v9`:** Basic remains the first
+milestone. Reactive and Forecast cases now require more preparation:
+compare repair costs, remember announced booking windows and preserve a backup
+before an uncertain disruption resolves. Some requirements come from linked
+sources and later messages may update only one field. See
+[`BENCHMARK.md`](BENCHMARK.md) for examples. The tools, score formula, fixed cost
+allowances and three submitted files are unchanged. Back up your solution files
+before updating, then test and resubmit your adapted solution. Earlier-version
+scores stay separate; compare implementations on the same case bank.
 
 The starter is runnable. You can begin with prompts and configuration, then
 extend routing, memory or the action loop as your experiments identify failures.
@@ -355,6 +364,16 @@ all model calls you started to complete before returning from `solve()`; do not
 leave background requests running. A full rewrite is optional, and memory format
 itself is not graded.
 
+Keep the current task together with the evidence needed for the next action.
+Follow source references when a request leaves a field to another document.
+Merge partial amendments without resetting unrelated conditions. Remember an
+announced booking window even if no alert arrives when it opens. Before buying
+the cheapest ticket, check whether its cancellation fee leaves enough approved
+spending for a useful replacement. A held backup may let you wait for new
+information without cancelling a still-valid trip. These are policy choices
+inside the same three editable files; no new memory class is required. See the
+examples in [BENCHMARK.md](BENCHMARK.md).
+
 ## 6. Improve with visible experiments
 
 Read [BENCHMARK.md](BENCHMARK.md) for the scenario families, what can vary and
@@ -363,8 +382,8 @@ how to author useful local tests. The supplied cases are:
 | Set | Distinct cases | Repeats | Purpose |
 |---|---:|---:|---|
 | Dev | 9, three per level | 1 | Setup and small experiments. |
-| Public | 24, eight per level | 2 | 48 episodes; provisional public score /100. |
-| Hidden evaluation | 24, eight per level | 2 | Final evaluation with Public. |
+| Public | 24, eight per level | 2 | 48 episodes; provisional local development score /100. |
+| Hidden evaluation | 24, eight per level | 2 | Official staff evaluation with Public, including interim leaderboard entries. |
 | Your local cases | You choose | 1 | Optional diagnostic tests; no official grade. |
 
 The [data guide](data/README.md) and [three examples](data/examples.md) show
@@ -450,7 +469,9 @@ Dev, local and filtered/subset runs show mean outcomes /90, criterion and
 difficulty results, full success, actual token usage, grading cost and estimated
 API cost. They do not apply the
 full Public bank's cost reference to a different case set. Only a complete,
-unfiltered Public run receives the provisional /100 public score. Use `--tier`
+unfiltered Public run receives the provisional /100 local development score.
+This is not the official leaderboard score: staff evaluate Public plus Hidden,
+96 episodes in total, for both interim entries and final grading. Use `--tier`
 or `--limit` for smaller diagnostics.
 
 Runs preserve the source snapshot, configuration, actual replies, tool history,
@@ -507,6 +528,10 @@ Decisions grading cost = all input tokens × 0.10 / 1,000,000
 |---|---:|---:|
 | Public: 48 episodes | USD 0.01917000 | USD 0.00827514 |
 | Final Public + Hidden: 96 episodes | USD 0.03851960 | USD 0.01655132 |
+
+The fixed allowances above carry over from the preserved v8 benchmark. Its
+recorded API amounts are historical measurements, not new measurements of the current bank.
+Current case registration and the historical measurement are labeled separately.
 
 The grading cost is a common comparison measure, not an actual invoice. Reports
 also retain cached-token usage and the API cost estimate, including applicable
@@ -596,7 +621,9 @@ and its link will be added here. It will include total /100, each weighted
 criterion (including the four request subcriteria), Basic /30, Reactive /30,
 Forecast /30, shared API efficiency /10, complete success, grading cost and the
 separate API cost estimate. Detailed difficulty outcomes /90 remain available
-in the report.
+in the report. Every official staff entry, including interim leaderboard
+grading, uses 24 Public plus 24 Hidden cases twice each: 96 episodes. Your local
+Public score is a development result and does not replace that evaluation.
 
 **Final project submission is due December 21, 2026 (KST).** The exact deadline
 time and submission channel will be announced separately. The following limits

@@ -3,7 +3,7 @@ import hashlib
 import json
 import random
 
-FP_VERSION = 'travel-2026f-v8'
+FP_VERSION = 'travel-2026f-v9'
 FP_TIERS = ('basic', 'reactive', 'forecast')
 FP_FAMILIES = ('meeting_update', 'budget_update', 'temporary_preference',
                'conditional_waiver', 'quote_expiry', 'confirmation_interruption',
@@ -364,14 +364,265 @@ def make_forecast_case(seed, variant=0, split='dev'):
     return c
 
 
-FP_DEV_CASES = ([make_basic_case(18100+i, i, 'dev') for i in range(3)]
-    + [make_travel_case(8100+i, f, i % 2, 'dev')
-       for i, f in enumerate(('meeting_update', 'budget_update', 'traveler_scope'))]
-    + [make_forecast_case(28100+i, v, 'dev') for i, v in enumerate((0, 3, 4))])
-FP_PUBLIC_CASES = ([make_basic_case(19100+i, i, 'public') for i in range(8)]
-    + [make_travel_case(9100+i, f, i % 2, 'public') for i, f in enumerate(FP_FAMILIES)]
-    + [make_forecast_case(29100+i, i, 'public') for i in range(8)])
-FP_FINAL_CASES=FP_PUBLIC_CASES  # Compatibility name: this is the PUBLIC evaluation only.
+"""Integrated replanning scenarios using the published tools and score."""
+
+
+def _short_transfer(values, city, style=0):
+    if style % 2:
+        return (f'Client transfers in {city}: add {values["flight"]} minutes after an air arrival, '
+                f'{values["train"]} after a rail arrival, and {values["coach"]} after a coach arrival. '
+                'These are onward durations; ticket arrival times do not include them.')
+    return (f'Terminal-to-client travel in {city}: flight {values["flight"]} minutes, '
+            f'train {values["train"]} minutes, coach {values["coach"]} minutes. '
+            'Add the relevant transfer to the terminal arrival time.')
+
+
+def _short_waiver(category, code, cutoff, style=0):
+    if style % 2:
+        return (f'For this existing room, send {code} as evidence type {category} before virtual minute {cutoff}. '
+                'Use this bulletin version. Acceptance removes USD 55 and keeps the room. '
+                'A claim accepted earlier remains accepted.')
+    return (f'The room stays reserved. Waive the USD 55 charge by submitting evidence type '
+            f'{category}, code {code}, and this source version before virtual minute {cutoff}. '
+            'An accepted claim remains valid after a bulletin revision.')
+
+
+def _short_watch(risk, mode, delay, observed=False, storm=False, style=0):
+    if observed:
+        return ((f'The {mode} disruption occurred: weather-exposed services gained {delay} minutes. '
+                 if storm else f'The {mode} warning cleared without a delay. ')
+                + 'Current search and booking arrivals already include the actual result. '
+                'There is no further predicted delay: future risk is zero percent and no mode is under a watch.')
+    if style % 2:
+        return (f'For the lead outbound, the chance of a further {delay}-minute delay to weather-exposed '
+                f'{mode} services is {risk} percent. Other modes and protected services are outside this watch. '
+                'This is a forecast, not a delay already included in ticket arrivals.')
+    return (f'Lead outbound forecast: {mode} risk {risk} percent, possible additional delay {delay} minutes. '
+            f'Only weather_exposed {mode} services are affected; other modes are unaffected. '
+            'Do not add this forecast to observed arrivals as if it had already happened.')
+
+
+def _fresh_documents(c, style=0):
+    c['documents'] = {
+        'transport-guide': dict(id='transport-guide', title='Current client transfers', version=1,
+            text=_short_transfer(c['transfer'], c['city'], style), related=[]),
+        'hotel-terms': dict(id='hotel-terms', title='Existing room and fee', version=1,
+            text='Keep the room. A USD 55 charge is pending. Read hotel-bulletin for the evidence and cutoff.',
+            related=['hotel-bulletin']),
+        'hotel-bulletin': dict(id='hotel-bulletin', title='Current fee-waiver instructions', version=2,
+            text=_short_waiver(c['waiver_type'], c['waiver_code'], c['waiver_deadline'], style), related=[]),
+        'traveler-profile': dict(id='traveler-profile', title='Traveler and trip approval', version=1,
+            text='Booking platform operators: Aster, Birch, Cedar. The hotel and companion return must stay unchanged.',
+            related=[]),
+        'fare-terms': dict(id='fare-terms', title='Fare and hold terms', version=1,
+            text=fare_terms_text(), related=[]),
+    }
+
+
+def _release_request(c, extra, style=0, profile_fields=False):
+    clock = f"{c['deadline']//60:02d}:{c['deadline']%60:02d}"
+    mode = {'flight': 'flight', 'train': 'rail', 'coach': 'coach'}[c['preferred']]
+    finances = (f'Extra spending may not exceed USD {c["budget"]}, including the hotel charge and retained cancellation fees. '
+                f'For this trip I prefer {mode} when feasible. ')
+    if profile_fields:
+        c['documents']['traveler-profile']['text'] += ' Current lead outbound: ' + finances
+        finances = 'Read traveler-profile for the current spending approval and mode preference. '
+    access = 'I need step-free access. ' if c['requires_step_free'] else 'Stairs are currently fine. '
+    carrier = (f'Do not use {", ".join(c["avoid_carriers"])} for my replacement. '
+               if c['avoid_carriers'] else 'All listed operators are currently permitted. ')
+    if style % 2:
+        opening = (f'Please replace my cancelled outbound to {c["city"]}; reach the client by {clock}. '
+                   f'{finances}{access}{carrier}Keep the room and companion return and remove the room charge. ')
+    else:
+        opening = (f'Repair my cancelled outbound to {c["city"]} for the {clock} client appointment. '
+                   f'{finances}{access}{carrier}Waive the USD 55 hotel charge while preserving the room and companion return. ')
+    c['initial_request'] = (opening + f'Approval {c["consent"]} covers my replacement and permitted fare changes. '
+        f'Confirm a first outbound by virtual minute {c["booking_deadline"]}; monitor through minute 24 and finish by minute 36. '
+        'Later spending limits apply to new commitments; previously approved charges remain approved. ' + extra)
+
+
+def _offer(c, number, mode, price, arrival, carrier, term='flexible', fee=0,
+           opening=0, closing=36, access=True, exposed=False):
+    suffix = c['consent'].split('-', 1)[1]
+    return dict(id=f'offer-{suffix}-{number}', mode=mode, price=price,
+                arrival_minute=arrival, carrier=carrier, step_free=access,
+                comfort=3, inventory=2, expires_at=closing, available_from=opening,
+                connection='terminal', change_policy=term, cancel_fee_usd=fee,
+                weather_exposed=exposed)
+
+
+def make_integrated_reactive(seed, family, variant=0, split='dev', style=0):
+    """Known windows, independent revisions and recoverable fare decisions."""
+    c = make_travel_case(seed, family, variant, split)
+    index = FP_FAMILIES.index(family)
+    shifts = (0, 1, -1)[style % 3]
+    mode = ('flight', 'train', 'coach')[index % 3]
+    alternate = next(m for m in ('flight', 'train', 'coach') if m != mode)
+    opening, closing = ((0,36), (13,24), (12,22), (0,36),
+                        (11,17), (0,36), (10,16), (15,24))[index]
+    if opening:
+        opening += shifts
+        closing += shifts
+    c.update(budget=(240,195,225,230,230,240,215,225)[index], deadline=690,
+             preferred=mode, requires_step_free=False, avoid_carriers=[],
+             transfer=dict(flight=20,train=25,coach=30), hold_minutes=14,
+             waiver_deadline=(18,11,18,11,18,18,18,18)[index],
+             interrupt_confirmation=index==5, events=[])
+    _fresh_documents(c, style)
+    options=[]
+    for i, carrier in enumerate(('Aster','Birch','Cedar')):
+        for j, term in enumerate(('locked','fee','flexible')):
+            price = (90+i*5, 110+i*10, 260 if index in (1,6) else 150+i*5)[j]
+            fee = (35,10,25)[i] if term=='fee' else 0
+            options.append(_offer(c,len(options),mode,price,640+i,carrier,term,fee,
+                                 closing=14 if opening else 36,access=i!=0))
+        for travel_mode in (mode,alternate):
+            price = (180 if index in (0,3,5) else 170) + (i%2)*5
+            options.append(_offer(c,len(options),travel_mode,price,520+i*3,carrier,
+                                 opening=opening,closing=closing))
+    c['options']=options
+    event = lambda at, kind, text, **changes: dict(at=at,kind=kind,text=text,changes=changes)
+    window = (f'Replacement inventory opens at virtual minute {opening} and closes at minute {closing}. '
+              'Search in that window. A hold remains valid for 14 minutes after it is made, even if inventory closes. '
+              if opening else 'Further replacement offers remain available through minute 36. ')
+    extra = window
+    if index==0:
+        c['events']=[event(10,'user_update','The client appointment is now 09:40. Retain my other conditions.',deadline=580),
+                     event(19,'user_update','For my outbound, only Cedar is permitted from now on. This replaces the previous carrier list.',avoid_carriers=['Aster','Birch'])]
+    elif index==1:
+        extra += ('The later recovery fares are expected to start at USD 170. Choose an initial contract that leaves an affordable exchange if the client time changes. ')
+        c['events']=[event(9,'user_update','Finance reduces the ceiling for new commitments to USD 185, including all retained fees. Earlier approved charges stand.',budget=185),
+                     event(17,'user_update','The current client appointment is now 09:40. Keep the other requirements.',deadline=580)]
+    elif index==2:
+        c['events']=[event(12,'user_update',f'For this journey I now prefer {alternate} and require step-free access. The preference for future trips is unchanged.',preferred=alternate,requires_step_free=True),
+                     event(18,'user_update','The client now needs me by 09:40. Other requirements continue.',deadline=580)]
+    elif index==3:
+        replacement='disruption-letter' if c['waiver_type']=='cancel-reference' else 'cancel-reference'
+        c['documents']['hotel-bulletin']['text'] += ' A previous claim using proof-0000 belonged to another room.'
+        c['events']=[event(6,'document_update','The hotel replaced hotel-bulletin. Pending claims need the new procedure; accepted claims stand.',waiver=replacement,waiver_version=3,
+                          document_text=_short_waiver(replacement,c['waiver_code'],11,1-style%2)),
+                     event(17,'user_update','The client appointment moves to 09:40 and I now need step-free access. Keep the other conditions.',deadline=580,requires_step_free=True)]
+    elif index==4:
+        extra += ('The client will confirm a possibly earlier appointment at minute 18. A 09:30 arrival would cover the earliest proposed time. '
+                  'Keep a usable ticket while arranging any replacement. ')
+        c['events']=[event(18,'user_update','The client confirms 09:30 for this outbound. All other current requirements remain.',deadline=570)]
+    elif index==5:
+        c['events']=[event(8,'provider_notice','A lost confirmation reply may still mean the booking succeeded. Inspect the same request key before another commitment.'),
+                     event(18,'user_update','The client now needs me by 09:40 and only Birch is permitted for this outbound. This replaces the earlier carrier list.',deadline=580,avoid_carriers=['Aster','Cedar'])]
+    elif index==6:
+        extra += ('Roadworks start at minute 18: onward transfers can then require up to 65 minutes. The client is considering a 10:00 appointment and will confirm it at minute 20. A terminal arrival by 08:55 covers that possible appointment even with the longest announced transfer. ')
+        values=dict(flight=65,train=60,coach=55)
+        c['events']=[event(18,'transport_update','Roadworks began. Read the revised client transfer guide; ticket arrival clocks did not change.',transfer=values,document_text=_short_transfer(values,c['city'],style)),
+                     event(20,'user_update','The client appointment is now 10:00. Keep all other conditions.',deadline=600)]
+    else:
+        c['events']=[event(13,'user_update','For my current outbound, stairs are no longer possible and only Aster is permitted. This replaces the earlier operator list.',requires_step_free=True,avoid_carriers=['Birch','Cedar']),
+                     event(20,'user_update','The client appointment is now 09:40. My access and carrier requirements remain in force.',deadline=580)]
+    _release_request(c,extra,style,profile_fields=index in (1,7))
+    random.Random(seed ^ 0x5931).shuffle(c['options'])
+    c['events'].sort(key=lambda e:e['at'])
+    return c
+
+
+def make_contingent_forecast(seed, variant=0, split='dev', style=0):
+    """A held backup can survive a window and be exercised after resolution.
+
+    Both members of a pair have the same initial observable evidence. A policy
+    can retain its preferred ticket on a false alarm and use a still-valid hold
+    after a real delay, without knowing the event tape in advance.
+    """
+    family=(variant%8)//2
+    storm=variant%2==0
+    pair_seed=seed-(variant%2)
+    c=make_travel_case(pair_seed,'meeting_update',family,split)
+    display_suffix=str(random.Random(seed ^ 7489).randrange(10000,99999))
+    c['case_id']=f'{split}-{display_suffix}'
+    c['seed']=seed
+    c['variant']=variant
+    mode=('flight','train','coach','train')[family]
+    watched=('flight','train','flight','train')[family]
+    first_risk=(35,30,65,45)[family]
+    current_risk=(75,70,80,70)[family]
+    delay=(120,110,100,100)[family]
+    offset=(0,1,-1)[style%3]
+    opening=(12,13,11,12)[family]+offset
+    closing=(18,19,17,18)[family]+offset
+    resolved=(22,23,21,22)[family]+offset
+    recovery_price=(175,170,165,175)[family]
+    c.update(family='weather_planning',difficulty='forecast',
+        advanced_situation=('held_backup','repair_budget','revised_watch','transfer_and_backup')[family],
+        budget=(215,150,150,215)[family],deadline=620 if family!=3 else 600,
+        preferred=mode,requires_step_free=family==2,avoid_carriers=[],
+        transfer=dict(flight=20,train=20,coach=20),booking_deadline=12,
+        hold_minutes=14,interrupt_confirmation=False,waiver_deadline=11,
+        waiver_type='cancel-reference' if family%2==0 else 'disruption-letter')
+    _fresh_documents(c,style)
+    c['documents']['weather-forecast']=dict(id='weather-forecast',title='Current outbound weather watch',version=1,
+        text=_short_watch(first_risk,watched,delay,style=style),related=[])
+    c['options']=[]
+    for i,carrier in enumerate(('Aster','Birch','Cedar')):
+        for term in ('locked','fee','flexible'):
+            price={'locked':85+5*i,'fee':105+15*i,'flexible':260+5*i}[term]
+            fee=((45,10,30)[i] if family==1 else (30,10,20)[i]) if term=='fee' else 0
+            c['options'].append(_offer(c,len(c['options']),mode,price,540+i*2,carrier,term,fee,
+                                      closing=closing,access=True,exposed=True))
+        for fallback in ('flight','train','coach'):
+            if fallback==mode: continue
+            arrival=540+i*2 if family!=3 else (535+i*2 if fallback=='flight' else 550+i*2)
+            c['options'].append(_offer(c,len(c['options']),fallback,recovery_price+i*2,arrival,carrier,
+                                      opening=opening,closing=closing,access=True))
+        # Later services in the preferred mode have different delay headroom.
+        # The earliest can absorb the watch, but is not always within budget.
+        same_price=((190,160,145),(225,155,145),(225,155,145),(190,160,145))[family][i]
+        same_arrival=(470,515,545)[i] if family!=3 else (465,510,540)[i]
+        c['options'].append(_offer(c,len(c['options']),mode,same_price,same_arrival,carrier,
+                                  opening=opening,closing=closing,access=True,exposed=True))
+    extra=(f'Backup inventory opens at virtual minute {opening} and closes at minute {closing}; '
+           f'the weather report resolves at minute {resolved}. Alternative-mode backup fares start at USD {recovery_price}; later preferred-mode services have their own fares and arrival margins. '
+           'A hold lasts 14 minutes from creation and can be confirmed after inventory closes while the hold remains valid. '
+           'A forecast may be a false alarm: keep the preferred service when it remains suitable. '
+           'Read the current weather watch before deciding which service needs a backup. ')
+    emergency_ceiling={1:190,2:205}.get(family)
+    if emergency_ceiling:
+        extra += (f'If the weather report confirms an actual disruption of my preferred service, finance will raise the total ceiling to USD {emergency_ceiling}. '
+                  'This replaces the ordinary ceiling; it is not extra money and is not active until a confirmation notice arrives. '
+                  'You may hold a backup before that decision, but do not pay beyond the current ceiling. ')
+    _release_request(c,extra,style,profile_fields=family==1)
+    c['events']=[dict(at=8,kind='forecast_update',
+        text='Dispatch replaced the lead-outbound weather watch. Read the current source; its mode or likelihood may have changed.',
+        changes=dict(document_text=_short_watch(current_risk,mode,delay,style=1-style%2)))]
+    if family==3:
+        transfer=dict(flight=25,train=20,coach=70)
+        c['events'].append(dict(at=10,kind='transport_update',
+            text='A road closure changed the onward journey. Refresh transport-guide before choosing a backup.',
+            changes=dict(transfer=transfer,document_text=_short_transfer(transfer,c['city'],style))))
+    if family==2:
+        c['events'].append(dict(at=6,kind='user_update',
+            text='Only Cedar is now permitted for my outbound. This replaces the earlier carrier list; retain my step-free requirement and other trip rules.',
+            changes=dict(avoid_carriers=['Aster','Birch'])) )
+    c['events'].append(dict(at=resolved,kind='weather_update',
+        text='The current weather watch has resolved. Inspect current booking arrivals; they include the actual delay. A previously held backup may still be usable.',
+        changes=dict(weather_delays={mode:delay if storm else 0},
+            forecast_text=_short_watch(current_risk,mode,delay,observed=True,storm=storm,style=style))))
+    if emergency_ceiling:
+        c['events'].append(dict(at=resolved,kind='user_update',
+            text=(f'The disruption is confirmed. Finance now authorizes a total ceiling of USD {emergency_ceiling} for new commitments, including retained cancellation fees. All other trip conditions remain.'
+                  if storm else 'The weather warning cleared. The ordinary USD 150 ceiling remains in force; no emergency allowance was activated.'),
+            changes=dict(budget=emergency_ceiling if storm else 150)))
+    c['events'].sort(key=lambda e:e['at'])
+    random.Random(pair_seed ^ 0x5912).shuffle(c['options'])
+    return c
+
+
+FP_DEV_CASES = ([make_basic_case(18100+i,i,'dev') for i in range(3)]
+    + [make_integrated_reactive(8100+i,f,i%2,'dev',i%2)
+       for i,f in enumerate(('meeting_update','budget_update','quote_expiry'))]
+    + [make_contingent_forecast(28100,0,'dev'),
+       make_contingent_forecast(28101,1,'dev'),
+       make_contingent_forecast(28102,2,'dev')])
+FP_PUBLIC_CASES = ([make_basic_case(19100+i,i,'public') for i in range(8)]
+    + [make_integrated_reactive(9100+i,f,i%2,'public',i%2) for i,f in enumerate(FP_FAMILIES)]
+    + [make_contingent_forecast(29100+i,i,'public',((i//2)%2)) for i in range(8)])
+FP_FINAL_CASES=FP_PUBLIC_CASES
 
 
 def public_case_list(cases):
