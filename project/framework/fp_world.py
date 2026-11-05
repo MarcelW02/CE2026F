@@ -5,11 +5,13 @@ import json
 
 from .fp_cases import FP_VERSION, fp_hash, FP_OUTCOME_POINTS, FP_OUTCOME_MAX, FP_SCORE_VERSION
 
+FP_TOOL_CONTRACT_REVISION = "catalog-read-20261105"
+
 FP_TOOL_DURATIONS = dict(search=2, read=2, inquire=3, hold=1, confirm=2,
                         cancel=2, status=1, claim=2, wait=1, finish=0)
 FP_TOOL_GUIDE = {
     "search": "Search current replacement outbound options. No arguments required.",
-    "read": "Read a current source by id; start with transport-guide, hotel-terms, traveler-profile, or weather-forecast when available. Forecasts describe current evidence, not guaranteed future outcomes.",
+    "read": "Read a current source whose id is in source_catalog before submitting the batch. Read hotel-terms first, then request its bulletin in a later batch. A rejected read still takes two minutes. Forecasts describe current evidence, not guaranteed future outcomes.",
     "inquire": "Ask a provider about a topic. topic=hotel gives the waiver source; topic=traveler gives the latest request and consent; topic=transport gives the transfer source.",
     "hold": "Temporarily reserve option id. Returns hold id and its expiry.",
     "confirm": "arguments.id MUST be the returned hold-N id, not an option id. arguments.code MUST be the exact consent-N code in the request. arguments.key is a new caller-chosen stable string. Replaying that same id/code/key is idempotent.",
@@ -156,6 +158,8 @@ class TravelWorld:
             raise ValueError("Provide at least one tool action.")
         if len(actions)>1 and any(a.get("tool")=="finish" for a in actions):
             raise ValueError("Finish must be a separate action after verifying the other results.")
+        # Discovery must precede submission, including queued jobs in this batch.
+        readable_sources = {source["id"] for source in self.observe()["source_catalog"]}
         # Public worker slots apply equally to single-agent and multi-agent policies.
         slots = [self.now] * self.concurrency
         jobs = []
@@ -181,6 +185,10 @@ class TravelWorld:
             self._advance(end)
             if end > self._spec["horizon"] or self.finished:
                 result = dict(ok=False, error="Episode horizon reached or episode already finished.")
+            elif (action["tool"] == "read" and action["arguments"].get("id") in self._docs
+                  and action["arguments"].get("id") not in readable_sources):
+                result = dict(ok=False, source_not_discovered=True,
+                    error="Source is not in the catalog for this batch. Read hotel-terms first, then read its bulletin in a later batch.")
             else:
                 result = self._execute(action["tool"], action["arguments"])
             row = dict(kind="tool", tool=action["tool"], arguments=action["arguments"],

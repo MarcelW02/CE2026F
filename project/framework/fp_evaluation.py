@@ -10,7 +10,7 @@ from .fp_cases import (fp_hash, travel_case_fingerprints, FP_VERSION, FP_OUTCOME
                        FP_SCORE_VERSION, FP_OUTCOME_MAX, FP_EFFICIENCY_MAX, FP_SCORE_MAX,
                        FP_GRADING_COST_BASIS)
 from .fp_api import grading_cost_from_record
-from .fp_world import TravelWorld
+from .fp_world import TravelWorld, FP_TOOL_CONTRACT_REVISION
 from .fp_agents import run_travel_agent, travel_route
 
 
@@ -26,6 +26,7 @@ def evaluate_travel(cases, api, config, repeats=1, route_fn=travel_route, concur
     if not cases or type(case_workers) is not int or case_workers<1:
         raise ValueError("Provide cases and a positive case_workers count.")
     result = dict(version=FP_VERSION, scoring_version=FP_SCORE_VERSION,
+        tool_contract_revision=FP_TOOL_CONTRACT_REVISION,
         grading_cost_basis=FP_GRADING_COST_BASIS,
         status="running", config=copy.deepcopy(config),
         route_source=None, configuration_fingerprint=fp_hash(config),

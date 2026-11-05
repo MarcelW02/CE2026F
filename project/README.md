@@ -18,6 +18,12 @@ Decisions API is available through `api.decide`. Get the updated project release
 before using these methods; keep the protected framework unchanged. Your own
 previously issued course API key is the setup key. The default starter and scoring contract remain the same. See section 4 for the two interfaces.
 
+**November 5 source-access correction:** Complete `hotel-terms` before reading
+its bulletin in a later batch. Read requests now require the source to be in the
+current catalog before that batch is submitted. Update the framework, test, and
+package your next submission again. This correction is identified as
+`catalog-read-20261105`. See the [update notes](../README.md#project-updates).
+
 **November 3 benchmark update — `travel-2026f-v9`:** Basic remains the first
 milestone. Reactive and Forecast cases now require more preparation:
 compare repair costs, remember announced booking windows and preserve a backup
@@ -300,7 +306,7 @@ and both cost views rather than assuming the new model or endpoint must win.
 | Tool | Virtual duration | Main arguments and result |
 |---|---:|---|
 | `search` | 2 | Current offers with IDs, prices, arrivals and fare terms. |
-| `read` | 2 | `id`: catalog source ID; returns its text and version. |
+| `read` | 2 | `id`: source ID already in the catalog before this batch is submitted; returns its text and version. |
 | `inquire` | 3 | `topic`: `traveler`, `hotel` or `transport`; returns current clarification. |
 | `claim` | 2 | `topic`, `code`, `version`: current waiver evidence; must complete strictly before cutoff. |
 | `hold` | 1 | `id`: offer ID; returns a hold ID and expiry. |
@@ -312,8 +318,13 @@ and both cost views rather than assuming the new model or endpoint must win.
 
 See [`framework/fp_world.py`](framework/fp_world.py) for exact contracts and
 [`framework/fp_agents.py`](framework/fp_agents.py) for working calls using
-`travel_action(...)`. Read `hotel-terms` and follow its bulletin link; inspect the
-current `transport-guide`, `traveler-profile`, and applicable `weather-forecast`.
+`travel_action(...)`. Read `hotel-terms`, wait for that read to complete, and
+request its linked bulletin in a later batch. Every `read` source must appear in
+`world.observe()["source_catalog"]` before the batch is submitted. Knowing an ID
+does not satisfy this prerequisite. A terms read and its bulletin read in the
+same batch are not sufficient; a rejected read still takes two virtual minutes.
+Inspect the current `transport-guide`, `traveler-profile`, and applicable
+`weather-forecast`.
 
 Tool results are dependencies: obtain a hold ID before confirming it. A missing
 confirmation reply can follow a committed booking; inspect `status` with the

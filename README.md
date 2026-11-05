@@ -14,6 +14,11 @@ announced separately.
 See the [October 22 project updates](#project-updates) for presentation details
 and answers about models, hidden cases, implementation and evaluation.
 
+**November 5 source-access correction:** A source must be in the current
+catalog before its `read` batch is submitted. Read `hotel-terms` first, then
+request its bulletin in a later batch. Get the correction and test your solution
+again. Cases, scoring and allowed implementation methods stay the same.
+
 **November 3 benchmark update — `travel-2026f-v9`:** Basic stays a stable
 starting point. Reactive and Forecast cases strengthen fare-change planning,
 announced booking windows and preparation for uncertain disruptions. Some
@@ -160,6 +165,21 @@ not leaderboard rank.
 It is independent of this final project and is not needed by the travel simulator.
 
 ## Project updates
+
+### November 5 source-access correction
+
+The simulator now enforces the documented source-discovery order. Every source
+requested by `read` must already appear in `world.observe()["source_catalog"]`
+when the batch is submitted. Complete the `hotel-terms` read before requesting
+its bulletin in a later batch; putting both reads in the same batch is not
+sufficient. A rejected read still consumes its normal two virtual minutes.
+
+Back up your three solution files, get the corrected framework, test, and package
+your next submission again. This correction applies equally to every team.
+Earlier scores remain records of the tool behavior used for those runs. The
+cases, score formula, API choices and permission to use a zero-API symbolic
+policy are unchanged. The project label remains `travel-2026f-v9`; this
+correction is identified as `catalog-read-20261105` in the release manifest.
 
 ### November 3 benchmark update: v8 to v9
 

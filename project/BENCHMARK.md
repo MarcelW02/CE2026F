@@ -31,6 +31,19 @@ uses its input-only rate for every input token and has no separate output fee.
 The report separately shows the usage-based API cost estimate with cache
 discounts. The grading measure is not an actual invoice.
 
+## November 5 source-access correction
+
+A `read` source must already be in the public catalog when its batch is
+submitted. Read `hotel-terms` and receive its result before requesting the linked
+bulletin in a later batch. Reading both in one batch does not meet the
+prerequisite. A rejected read still takes its usual two virtual minutes.
+
+This enforces source discovery equally for every implementation. The case bank,
+score formula, API choices and permission to use a zero-API policy are unchanged.
+Earlier scores remain records of their original tool behavior; update, test and
+package your next submission under the correction. The project label stays
+`travel-2026f-v9`; the tool revision is `catalog-read-20261105`.
+
 ## November 3 planning revision: `travel-2026f-v9`
 
 This is a case update from the distributed v8 release. Basic keeps its existing

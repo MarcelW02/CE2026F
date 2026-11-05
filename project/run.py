@@ -8,7 +8,7 @@ from pathlib import Path
 from framework.fp_cases import FP_DEV_CASES, FP_PUBLIC_CASES, FP_VERSION, FP_SCORE_VERSION, FP_SCORE_MAX
 from framework.fp_inputs import select_cases, load_local_cases
 from framework.fp_cases import fp_hash
-from framework.fp_world import TravelWorld
+from framework.fp_world import TravelWorld, FP_TOOL_CONTRACT_REVISION
 from framework.fp_api import TravelAPI
 from framework.fp_baseline import FP_BASELINE
 from framework.fp_evaluation import evaluate_travel, grade_travel
@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 
 def offline_demo():
     world = TravelWorld(next(c for c in FP_PUBLIC_CASES if c["family"] == "conditional_waiver"))
+    world.call("read", id="hotel-terms")
     before = world.call("read", id="hotel-bulletin")["source"]
     world.call("wait", minutes=5)
     after = world.call("read", id="hotel-bulletin")["source"]
@@ -62,6 +63,7 @@ def main():
             if not key or key == "PASTE_YOUR_KEY_HERE": raise ValueError("Set the instructor-issued OPENAI_API_KEY in .env.")
             api = TravelAPI(OpenAI(api_key=key, timeout=180.0, max_retries=0), max_calls=1000, max_usd=2.0)
         report = dict(version=FP_VERSION, scoring_version=FP_SCORE_VERSION,
+            tool_contract_revision=FP_TOOL_CONTRACT_REVISION,
             split=split, tier_filter=args.tier,
             local_cases_file=str(args.local_cases) if args.local_cases else None,
             instance_fingerprints={case["case_id"]: fp_hash(case) for case in cases},
