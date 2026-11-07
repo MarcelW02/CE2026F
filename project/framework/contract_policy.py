@@ -421,6 +421,12 @@ def run_operational_hybrid(world, api, config, route_fn):
                 for domain, identifiers in scopes.items():
                     if source["id"] in identifiers and domain not in domains:
                         domains.append(domain)
+        # New inventory can share an unchanged fare source. Its refund mapping
+        # still needs transport interpretation, even without a source revision.
+        previous_refunds = (payload.get("previous") or {}).get("refund_terms", {})
+        if (set(previous_refunds) != {offer["id"] for offer in payload["offers"]}
+                and "transport" not in domains):
+            domains.append("transport")
         result = compile_contract(payload, api, config, domains, traces)
         seen_versions.update({source["id"]: source["version"] for source in payload["documents"]})
         memory.update(investigated=True, revision=observation["revision"],
