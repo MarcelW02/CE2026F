@@ -13,6 +13,18 @@ from .settings import (PRICES, EFFORTS, CACHE_WRITE_PRICES, DECISION_PRICES,
 from .fp_cases import fp_hash, FP_GRADING_COST_BASIS
 
 
+class APISetupError(RuntimeError):
+    """Local request preparation failed before an API request was submitted."""
+
+
+def _input_token_count(text):
+    try:
+        import tiktoken
+        return len(tiktoken.get_encoding("o200k_base").encode(text))
+    except Exception as exc:
+        raise APISetupError("Could not prepare token accounting; resolve tokenizer setup before a new run.") from exc
+
+
 def _tokens(value):
     return value if type(value) is int and value >= 0 else None
 
@@ -274,8 +286,7 @@ class TravelAPI:
         validate_settings(config)
         text = json.dumps(payload, ensure_ascii=False, allow_nan=False)
         schema_text = json.dumps(schema, allow_nan=False)
-        import tiktoken
-        tokens = len(tiktoken.get_encoding("o200k_base").encode(instructions+text+schema_text))+1024
+        tokens = _input_token_count(instructions+text+schema_text)+1024
         p = PRICES[config["model"]]
         input_rate = max(p[0], CACHE_WRITE_PRICES.get(config["model"], p[0]))
         reservation = (tokens*input_rate+config["max_output_tokens"]*p[2])/1e6
@@ -329,9 +340,7 @@ class TravelAPI:
         request = _decision_request(payload, questions, model)
         if task is not None and not isinstance(task, str):
             raise ValueError("Decisions task must be a string or None.")
-        import tiktoken
-        tokens = len(tiktoken.get_encoding("o200k_base").encode(
-            json.dumps(request, ensure_ascii=False, allow_nan=False)))+1024
+        tokens = _input_token_count(json.dumps(request, ensure_ascii=False, allow_nan=False))+1024
         reservation = tokens*DECISION_PRICES[model]/1e6
         row = self._row("decisions", {"model": model}, request, payload, label, task=task)
         row["request_number"] = self._reserve(reservation)

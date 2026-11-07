@@ -10,7 +10,8 @@ from .fp_cases import (fp_hash, travel_case_fingerprints, FP_VERSION, FP_OUTCOME
                        FP_SCORE_VERSION, FP_OUTCOME_MAX, FP_EFFICIENCY_MAX, FP_SCORE_MAX,
                        FP_GRADING_COST_BASIS)
 from .fp_api import grading_cost_from_record
-from .fp_world import TravelWorld, FP_TOOL_CONTRACT_REVISION
+from .fp_world import FP_TOOL_CONTRACT_REVISION
+from .world_factory import world_for_case
 from .fp_agents import run_travel_agent, travel_route
 
 
@@ -39,14 +40,14 @@ def evaluate_travel(cases, api, config, repeats=1, route_fn=travel_route, concur
     try:
         result["route_source"] = inspect.getsource(route_fn)
     except (OSError, TypeError):
-        result["route_source"] = "Source unavailable; keep the executed routing cell in the submitted notebook."
+        result["route_source"] = "Source unavailable; the submission record retains the three solution files."
     start = time.monotonic()
     start_records = len(api.records) if api else 0
     jobs = [(copy.deepcopy(c), repeat) for repeat in range(repeats) for c in cases]
     pending_observed_after_solver = 0
     def run(job):
         case, repeat = job
-        world = TravelWorld(case, concurrency=concurrency)
+        world = world_for_case(case, concurrency=concurrency)
         failed = None
         try:
             solver = (solver_fn or run_travel_agent)(world, api, config, route_fn)
@@ -59,7 +60,8 @@ def evaluate_travel(cases, api, config, repeats=1, route_fn=travel_route, concur
             if not world.finished:
                 world.call("finish")
         row = world.evaluate()
-        row.update(repeat=repeat+1, error_type=failed, solver=solver)
+        row.update(repeat=repeat+1, error_type=failed, solver=solver,
+                   observed_action_sequence=copy.deepcopy(getattr(world, "_recorded_policy_actions", None)))
         return row
     # Every world is isolated. Paid requests can overlap across cases; each
     # case's virtual chronology and tool ordering remain deterministic.
@@ -84,7 +86,7 @@ def evaluate_travel(cases, api, config, repeats=1, route_fn=travel_route, concur
                 progress(row)
             if pending:
                 break
-            if row["error_type"] in ("APITimeoutError", "APIConnectionError", "AuthenticationError", "RateLimitError", "BudgetExceeded"):
+            if row["error_type"] in ("APITimeoutError", "APIConnectionError", "AuthenticationError", "RateLimitError", "BudgetExceeded", "APISetupError"):
                 break
     result["rows"] = rows
     if api and hasattr(api, "snapshot_records"):
@@ -107,7 +109,7 @@ def evaluate_travel(cases, api, config, repeats=1, route_fn=travel_route, concur
         result["usage"]["calls"] += pending
         for key in ("input_tokens", "cached_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens", "estimated_usd", "grading_usd", "actual_request_seconds"):
             result["usage"][key] = None
-    infrastructure = any(r["error_type"] in ("APITimeoutError", "APIConnectionError", "AuthenticationError", "RateLimitError", "BudgetExceeded") for r in rows)
+    infrastructure = any(r["error_type"] in ("APITimeoutError", "APIConnectionError", "AuthenticationError", "RateLimitError", "BudgetExceeded", "APISetupError") for r in rows)
     result["complete"] = len(rows) == len(jobs) and not infrastructure and not pending and not pending_observed_after_solver
     result["status"] = "complete" if result["complete"] else "interrupted"
     result.update(travel_outcome_summary(rows))
@@ -219,9 +221,12 @@ def grade_travel(result, baseline):
     if not isinstance(S, (int,float)) or not math.isfinite(S) or S < 0:
         raise ValueError("Solver grading cost must be known, finite and nonnegative.")
     observed_baseline, observed_solver = baseline.get("estimated_usd"), result["usage"].get("estimated_usd")
-    if any(type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0
-           for cost in (observed_baseline, observed_solver)) or observed_baseline <= 0:
-        raise ValueError("Observed baseline and solver API costs must be finite and nonnegative; baseline cost must be positive.")
+    declared = baseline.get("allowance_kind") == "prorated_historical_per_episode"
+    if type(observed_solver) not in (int, float) or not math.isfinite(observed_solver) or observed_solver < 0:
+        raise ValueError("Observed solver API cost must be finite and nonnegative.")
+    if not (declared and observed_baseline is None) and (
+            type(observed_baseline) not in (int, float) or not math.isfinite(observed_baseline) or observed_baseline <= 0):
+        raise ValueError("Use a measured baseline or an explicitly registered declared allowance.")
     if any(not isinstance(result["components"][key], (int,float))
            or not math.isfinite(result["components"][key])
            or not 0 <= result["components"][key] <= 1 for key in FP_OUTCOME_POINTS):
@@ -237,6 +242,7 @@ def grade_travel(result, baseline):
         criterion_points=points,tiers=copy.deepcopy(result.get("tiers", {})),
         baseline_usd=observed_baseline,solver_usd=observed_solver,
         baseline_grading_usd=B,solver_grading_usd=S,raw_score=raw,score=min(FP_SCORE_MAX,raw),
+        allowance_kind=baseline.get("allowance_kind", "recorded_benchmark"),
         usage=result["usage"],mean_virtual_minutes=result["mean_virtual_minutes"])
 
 

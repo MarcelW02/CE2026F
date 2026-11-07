@@ -3,7 +3,7 @@ import hashlib
 import json
 import random
 
-FP_VERSION = 'travel-2026f-v9'
+FP_VERSION = 'travel-2026f-v10'
 FP_TIERS = ('basic', 'reactive', 'forecast')
 FP_FAMILIES = ('meeting_update', 'budget_update', 'temporary_preference',
                'conditional_waiver', 'quote_expiry', 'confirmation_interruption',
@@ -631,3 +631,11 @@ def public_case_list(cases):
 
 def travel_case_fingerprints(cases):
     return [fp_hash(c) for c in cases]
+
+
+# The versioned JSON files are the complete current development and Public banks.
+from pathlib import Path as _Path
+_data = _Path(__file__).resolve().parents[1] / "data"
+FP_DEV_CASES = json.loads((_data / "dev.json").read_text())
+FP_PUBLIC_CASES = json.loads((_data / "public.json").read_text())
+FP_FINAL_CASES = FP_PUBLIC_CASES

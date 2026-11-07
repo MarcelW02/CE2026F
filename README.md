@@ -2,38 +2,23 @@
 
 ## Travel planning with dynamic replanning
 
-Build a travel assistant that keeps a trip workable while requests, travel
-conditions and booking opportunities change. Your system must interpret the
-current evidence, maintain useful state, make approved bookings, and verify the
-result. The final score combines task outcomes and API efficiency, out of 100.
+Build an assistant that keeps a trip workable as requests, weather and booking
+options change. Read the right evidence, update memory, make authorized bookings
+and verify the result. Travel outcomes and API cost produce a score out of 100.
+You may use one or several model roles, ordinary Python planning, or a combination.
 
-**Final submission: December 21, 2026 (KST).** The exact deadline time will be
-announced separately.
+**Version: `travel-2026f-v10`.** The update adds conditional spending permission,
+arrival requirements, refund terms and paid reservations. Each team also
+contributes five evaluation cases. [Updating an existing solver](#updating-from-v9)
+explains how to keep your work.
 
-**All final presentations are online via Zoom.** No on-site attendance is required.
-See the [October 22 project updates](#project-updates) for presentation details
-and answers about models, hidden cases, implementation and evaluation.
+**Final source deadline: December 21, 2026 (KST).** The exact time
+will be announced separately. All final presentations are **online via
+Zoom**, on the course presentation schedule.
 
-**November 5 source-access correction:** A source must be in the current
-catalog before its `read` batch is submitted. Read `hotel-terms` first, then
-request its bulletin in a later batch. Get the correction and test your solution
-again. Cases, scoring and allowed implementation methods stay the same.
+## Start here
 
-**November 3 benchmark update — `travel-2026f-v9`:** Basic stays a stable
-starting point. Reactive and Forecast cases strengthen fare-change planning,
-announced booking windows and preparation for uncertain disruptions. Some
-current facts are supplied by linked sources. The tools, 100-point formula,
-fixed cost allowances and three submitted files stay the same. Read the
-[benchmark guide](project/BENCHMARK.md) and the update notes below before running
-your solution on the new cases.
-
-**Start in [`project/`](project/).** It contains the complete runnable starter,
-public data, tools and evaluator. Install the listed dependencies and follow
-the setup steps below to run it.
-
-## Get started
-
-Clone this repository, open a terminal in the cloned folder, and run:
+Use Python 3.11 or later. From this repository:
 
 ```bash
 cd project
@@ -43,17 +28,15 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Use Python 3.11 or later. On Windows, activate with
-`.venv\Scripts\activate`; in PowerShell, use
-`.venv\Scripts\Activate.ps1` and `Copy-Item .env.example .env`.
-Open `.env` locally and replace the placeholder with your own course API key,
-which has already been distributed to you:
+On Windows PowerShell, use `.venv\Scripts\Activate.ps1` and
+`Copy-Item .env.example .env`. Put your own already distributed course API key
+in the local `.env` file:
 
 ```dotenv
 OPENAI_API_KEY=PASTE_YOUR_KEY_HERE
 ```
 
-Then check the setup without model calls, followed by a small paid run:
+Never share the key. `.env` and generated runs/submissions are ignored by Git.
 
 ```bash
 python run.py --offline
@@ -61,42 +44,38 @@ python inspect_case.py --split dev --case 1
 python run.py --split dev --limit 2 --output runs/setup_check
 ```
 
-The first two commands need no key and make no model calls. The inspection
-shows a real request, current sources and travel offers. The last command makes
-paid requests. Use a fresh output directory for each run. Open
-`runs/setup_check/report.html` to inspect what happened.
+The first two commands make no model calls. The third is a **paid experiment**.
+Open `runs/setup_check/report.html` to see the outcomes, actions and API usage.
+Use a fresh output directory for each run.
 
-## Your implementation
+## Your solver and five cases
 
-Edit exactly these three files:
-
-You may change any of them; you do not have to change all three.
+Your work has two parts: edit the three solver files below, and create five
+travel cases in your own JSON file under `project/local_cases/`. The
+[case guide](project/CASE_GUIDE.md) provides templates and the packaging command.
 
 | File | Your choices |
 |---|---|
-| [`project/solution/config.py`](project/solution/config.py) | Model, supported settings, architecture, refresh and policy budgets. |
-| [`project/solution/prompts.py`](project/solution/prompts.py) | Task instructions and role prompts. |
-| [`project/solution/policy.py`](project/solution/policy.py) | Routing, context selection, memory, local planning and the agent loop. |
+| [`project/solution/config.py`](project/solution/config.py) | Model, supported settings, refresh and policy budgets. |
+| [`project/solution/prompts.py`](project/solution/prompts.py) | Instructions and role prompts. |
+| [`project/solution/policy.py`](project/solution/policy.py) | Routing, memory, planning and the agent loop. |
 
-The starter already runs. You can improve the supplied loop or implement your
-own loop inside `policy.py`; a new memory class or a full rewrite is optional.
-Keep submitted helper code in these three files. Use the Python standard library,
-the supplied framework and packages in `requirements.txt`; extra packages and
-local assets are not included or installed from your submission. Keep the shared
-framework, cases, accounting, evaluator and runners unchanged.
+These are the **only submitted Python files**. Put helpers inside them. Read the
+framework freely, but keep the tools, accounting, evaluator, runners and supplied
+benchmark data unchanged. Use the standard library and the provided requirements;
+extra code files or assets are not installed from a submission.
 
-A useful first experiment is to enable selective context refresh on a Reactive
-dev case and compare the outcome and both model-cost estimates. The
-[student guide](project/README.md#6-improve-with-visible-experiments) gives the
-commands. Local optimization and valid symbolic solutions are allowed. Agent
-count itself earns no points.
-
-Read the **[student guide](project/README.md)** for the scenario, tool contracts,
-memory scaffold, evaluation, debugging and submission steps.
+The starter provides a working loop, source memory, a numerical planner and API
+logging. It deliberately keeps its first interpretation unless you enable
+refresh. You can improve this loop or replace it. Memory lasts for one trip; each new
+case execution starts fresh. See the
+[student guide](project/README.md#2-your-files-and-the-provided-scaffold) for memory
+rules and the provided components. All model calls use the supplied API wrapper,
+which supports Responses and Decisions. AI-coder assistance is allowed.
 
 ## Test and submit
 
-Run these commands from `project/`:
+Run from `project/`:
 
 ```bash
 python run.py --split dev --output runs/dev_01
@@ -104,189 +83,82 @@ python run.py --split public --output runs/public_01
 python submit.py --output submissions/team_solution.zip
 ```
 
-Start with nine dev cases. Read the [benchmark guide](project/BENCHMARK.md)
-to understand the kinds of problems your assistant must handle and how to make
-your own optional local tests. The supplied data contains 33 student-visible
-cases: nine dev and 24 public. Local tests and dev runs report outcomes out of 90,
-grading cost and estimated API cost. Grading charges cached input at the regular
-input rate so a cache discount does not change your score.
+Dev has nine cases. A complete local Public run evaluates 30 cases twice and
+shows a development score. **Only official grading contributes to the
+leaderboard.** We run your submitted solver on this common set, once per case:
 
-Local Public evaluation runs 24 cases twice and gives a provisional development
-score. All official staff grading, including interim leaderboard entries and
-final grading, reruns the frozen submitted source on 24 public plus 24 hidden
-cases, twice each: 96 episodes. A local Public score is not an official
-leaderboard score. Submit only the generated source ZIP, containing
-your three solution files and an automatic manifest. Your local test data is not
-part of the submission or official grading.
+| Official evaluation set | Cases | Who can see them before grading? |
+|---|---:|---|
+| Fixed Public examples | 30 | Everyone, in this repository. |
+| Team-contributed cases | 30: five per team | Each team knows its own five; other teams do not receive them. |
+| Independently prepared Hidden cases | 60 | Not released to teams. |
+| **Total** | **120** | The same evaluation set is used for every team. |
 
-Never put a real key in source, commit `.env`, or include it in a submission.
-The repository ignores local keys, environments, runs, local test cases and
-submission ZIPs. `.env.example` contains only a placeholder.
+At every leaderboard or final submission, email **two ZIPs** to the existing
+course submission address:
 
-## Project materials
+1. Your solver ZIP, created by `submit.py`.
+2. Your five-case ZIP, created using the [case guide](project/CASE_GUIDE.md).
+   Include it even when your cases have not changed.
 
-- [Student guide](project/README.md)
-- [Benchmark characteristics and local test authoring](project/BENCHMARK.md)
-- [Public data and case inspection](project/data/README.md)
-- [Worked scenario examples](project/data/examples.md)
-- [Public tools and implementation](project/framework/)
+Accepted contributions replace the supplied starting cases in your five assigned
+slots; revisions do not accumulate. They **do not change the fixed Public set**
+or require changes to the independently prepared Hidden cases. Keep your case
+files and witnesses out of public repositories. All evaluation cases use the
+[published benchmark scope](project/BENCHMARK.md). Scores are compared only on the
+same evaluation-set version.
 
-The data guide explains zero-API inspection. All 33 student-visible cases have
-initial requests and source titles in
-[`project/data/catalog.jsonl`](project/data/catalog.jsonl). The benchmark guide
-explains what can vary, how to test new wording or trip facts, and how to avoid
-building a solution that only recognizes known case IDs.
+## Score and leaderboard
 
-Course staff will publish interim results in a shared Google spreadsheet.
-Each official entry uses the complete public-plus-hidden 96-episode evaluation;
-students' local Public runs remain development checks.
-The leaderboard will be created later, and its link will be added here.
-It will show total /100, each criterion, Basic /30, Reactive /30, Forecast /30,
-the shared API-efficiency score /10, full success, grading cost and estimated API
-cost. The three difficulty contributions plus efficiency add to the total.
-Detailed per-tier outcomes use the same 90-point outcome rubric.
+| Criterion | Maximum |
+|---|---:|
+| Usable arrival | 40 |
+| Current requests: spending, preference, accessibility and carrier | 20 |
+| Hotel fee waiver | 10 |
+| Safe actions | 10 |
+| Reliable handoff | 10 |
+| API efficiency | 10 |
 
-**Final project submission is due December 21, 2026 (KST).** The exact deadline
-time and submission channel will be announced separately. The interim leaderboard
-schedule uses Korean calendar dates (Asia/Seoul):
+The outcome criteria are averaged over cases. API efficiency compares the cost
+of all model calls in the official evaluation with a common allowance of
+**$0.04814950**. Cached input uses the ordinary input price for grading; actual
+cost estimates are shown separately. Earlier development costs are not added to
+the official evaluation. See the [score formula and examples](project/README.md#7-understand-the-100-point-score).
 
-| Dates in 2026 | Interim grading requests per team |
+The leaderboard will be a shared Google spreadsheet; the link will be added
+here later. It shows the total, criterion and difficulty scores, success and
+costs. Final grades use your final submitted source, not your rank or best past
+entry. The maximum remains 100, with no points for a particular architecture.
+
+| Date in 2026, Korean time | What happens |
 |---|---|
-| Through December 13 | One per calendar day. |
-| December 14–19, inclusive | No daily limit. |
-| From December 20 | Closed. |
+| Through December 7, inclusive | Submit or revise your five cases with each solver submission. |
+| From December 8 | Attach the same accepted cases while improving your solver. |
+| Through December 13 | At most one leaderboard grading request per team per calendar day. |
+| December 14–19, inclusive | No daily limit on leaderboard grading requests. |
+| From December 20 | Interim leaderboard grading requests are closed. |
+| December 21 | Final source submission is due; exact time announced separately. |
 
-The December 20 cutoff closes interim feedback; the final source ZIP is still due
-on December 21. The spreadsheet link will be added here after the leaderboard is
-created. Final grades use the frozen submission's task results and grading cost,
-not leaderboard rank.
+December 7 is the case-content cutoff, not a single submission day. Cases
+received by then may finish review later. Any necessary correctness fixes will
+be explained and applied consistently to the common evaluation set.
 
-`CE2026F_A3_Documents.zip` is the existing Assignment 3 document collection.
-It is independent of this final project and is not needed by the travel simulator.
+## Updating from v9
 
-## Project updates
+Back up your three solution files, get the new release, then restore those files.
+Run the offline check and test Dev again. The function interfaces stay the same,
+but a fixed budget number or a base fare label may no longer describe all current
+conditions. Source discovery before reading remains required.
 
-### November 5 source-access correction
+## Reference guides
 
-The simulator now enforces the documented source-discovery order. Every source
-requested by `read` must already appear in `world.observe()["source_catalog"]`
-when the batch is submitted. Complete the `hotel-terms` read before requesting
-its bulletin in a later batch; putting both reads in the same batch is not
-sufficient. A rejected read still consumes its normal two virtual minutes.
+Start with this README and a small Dev run. Use the guides below as references
+while improving your solver; follow the case guide when preparing your five cases.
 
-Back up your three solution files, get the corrected framework, test, and package
-your next submission again. This correction applies equally to every team.
-Earlier scores remain records of the tool behavior used for those runs. The
-cases, score formula, API choices and permission to use a zero-API symbolic
-policy are unchanged. The project label remains `travel-2026f-v9`; this
-correction is identified as `catalog-read-20261105` in the release manifest.
+- [Student guide: memory, tools, API settings, score and submission](project/README.md)
+- [Benchmark: supported conditions and useful tests](project/BENCHMARK.md)
+- [Case guide: create, validate and package your five cases](project/CASE_GUIDE.md)
+- [Optional data inspection and examples](project/data/README.md)
 
-### November 3 benchmark update: v8 to v9
-
-This release updates the planning cases, not just their wording. Basic cases
-keep their existing tasks. Reactive and Forecast cases change combinations of
-offer prices, fare terms, hold lifetimes, booking windows and later updates.
-They ask your policy
-to preserve a feasible next step: include retained fees, prepare for a published
-recovery window, and use new evidence before making a dependent change. Some
-current requirements are split between the request and an explicitly linked
-source; a partial amendment leaves other requirements active.
-
-The [benchmark guide](project/BENCHMARK.md) gives the capabilities and examples.
-Dev and Public show the same kinds of decisions used in hidden evaluation.
-Tools, action durations, early-booking deadlines, allowed models, API accounting,
-the 100-point rubric, fixed cost allowances and the three editable files
-are unchanged. You can keep
-your existing implementation and improve it within those files.
-
-**Leaderboard protocol:** Official interim entries use Public plus Hidden,
-just like final grading: 96 episodes. Your local Public score is a development
-result, not an official leaderboard entry.
-
-Before updating, back up `solution/config.py`, `solution/prompts.py` and
-`solution/policy.py`. Get the updated release, restore your solution changes,
-and run the offline check and Dev cases again. Re-export any optional local
-cases whose version check fails. Update and resubmit your solution for this
-release; an old ZIP's diagnostic rerun is not a replacement for that opportunity.
-Earlier scores remain records of their earlier case bank and are not mixed with
-new scores. Every official entry uses the same current Public plus Hidden bank.
-
-This release fixes the benchmark and scoring contract for the project. A
-necessary correctness fix will be announced and applied equally. A high score
-from a valid, efficient implementation is not a reason to make the cases harder.
-No particular agent count or memory format is required.
-
-October 22, 2026.
-
-**Latest October 22 update: Decisions and `gpt-6-luna` are now supported.**
-Refresh your project from the updated release before using them; keep the shared
-framework unchanged. Use your own previously issued course API key. The default
-starter remains `gpt-5.6-luna`, and both new options are optional. This update
-supersedes the earlier guidance that excluded Decisions and Luna 6.0.
-
-These clarifications explain the project contract and the presentation format.
-They add no required implementation or grading criterion. See the
-[student guide](project/README.md) for setup, tools, scoring and submission.
-
-**Final presentations are online via Zoom for all teams.** There are no onsite
-presentations. Follow the course schedule for your presentation date and session;
-the Zoom link and joining details will be announced later. The final source ZIP
-is due **December 21, 2026 (KST)**. Its exact deadline time and submission channel
-will be announced separately. December 21 is the source-submission deadline,
-not an announcement of the presentation date.
-
-- **Allowed models and API.** Responses requests through `api.json` accept
-  `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.4-nano`, `gpt-5-mini`, `gpt-5-nano` and
-  `gpt-4o-mini`. Decisions requests through `api.decide` use `gpt-6-luna` and
-  return `choice`, `predicate` or `score` answers. Use each endpoint's documented
-  controls; Decisions does not take Responses effort or sampling settings. Both
-  methods share the call/dollar guards and usage ledger. Do not create a separate
-  client, edit protected framework files, or add automatic retries or fallback.
-  The [student guide](project/README.md#4-use-the-supplied-tools-and-api) shows
-  the wrapper and an optional example. A model's confidence is not proof that a
-  choice is correct, so keep normal booking and status verification.
-
-- **Hidden cases and parsing.** Hidden evaluation follows the published tools,
-  schemas and grading criteria, but is not limited to rewording public cases.
-  Amounts, requirements, combinations and event timings can vary within that
-  contract. Use source catalogs, document links and tool replies. Treat offer
-  IDs, booking IDs, approval codes and evidence codes as exact observed strings;
-  do not assume a fixed prefix, number of digits or length. General local parsers
-  are allowed. Future event definitions and case-ID answer tables cannot guide
-  solver actions. There is no extra hidden criterion.
-
-- **Architecture and memory.** You may keep the starter, use one or several model
-  roles, or build a general symbolic policy. There is no agent-count bonus.
-  Improve observed behavior and cost. Submit only `solution/config.py`,
-  `solution/prompts.py` and `solution/policy.py`, packaged with `submit.py`.
-  Helpers stay inside those files, and travel actions use the supplied world
-  interface. A custom memory design or full loop rewrite is optional.
-
-- **What the score measures.** Evaluation checks booking state **and action
-  history**. A suitable final booking does not erase missed initial-booking
-  deadlines, duplicates or unsafe changes. Outcomes contribute up to 90 points,
-  with up to 10 more for API efficiency. Grading cost charges all input tokens,
-  including cached input, at the regular input rate. Responses also counts output
-  at its output rate; Decisions has no output fee. The separate API cost estimate
-  remains visible.
-  Cache discounts do not improve the grade. API efficiency reaches its maximum
-  at or below the fixed benchmark cost; further savings do not add points.
-  Valid within-budget travel plans receive the same budget credit even if their
-  fares differ. See the [scoring explanation](project/README.md#7-understand-the-100-point-score)
-  for the formula and both cost views.
-
-- **Repair and API interruptions.** A bounded content-repair loop may make extra
-  `api.json` or `api.decide` requests to correct a content mistake; every request
-  counts toward the existing limits and cost. Actual API timeouts, connection,
-  authentication or rate-limit failures are different: stop the run, preserve
-  partial records and resolve the cause before a fresh run. No automatic paid
-  retry or engine fallback is provided. A simulated missing booking reply uses
-  the original request key and `status` to check whether the booking committed.
-
-- **Development checks.** Improve on dev and optional local cases, then test the
-  same frozen source and settings on cases kept aside during tuning. Keep local
-  case text, fields and event effects consistent. An old result is evidence for
-  the code that produced it, not for later edits. Compare difficulty-level
-  outcomes, failures and grading cost. Public and self-authored cases can be
-  overfit; small checks do not prove broad generalization. Final grading reruns
-  the frozen source on the published public-plus-hidden protocol.
+`CE2026F_A3_Documents.zip`, when present, belongs to Assignment 3 and is not needed
+for this project.

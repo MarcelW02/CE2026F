@@ -1,0 +1,97 @@
+{
+  "steps": [
+    {
+      "batch": [
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "hotel-terms"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "request-contract"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "arrival-contract"
+          }
+        }
+      ]
+    },
+    {
+      "batch": [
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "hotel-bulletin"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "transport-guide"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "fare-contract"
+          }
+        }
+      ]
+    },
+    {
+      "batch": [
+        {
+          "tool": "claim",
+          "arguments": {
+            "topic": "cancel-reference",
+            "code": "proof-914300",
+            "version": 2
+          }
+        },
+        {
+          "tool": "search",
+          "arguments": {}
+        }
+      ]
+    },
+    {
+      "tool": "hold",
+      "arguments": {
+        "id": "trip-5902aa58008"
+      }
+    },
+    {
+      "tool": "confirm",
+      "arguments": {
+        "id": {
+          "$ref": "steps.3.hold.id"
+        },
+        "code": "consent-914300",
+        "key": "witness-first"
+      }
+    },
+    {
+      "tool": "status",
+      "arguments": {
+        "key": "witness-first"
+      }
+    },
+    {
+      "tool": "wait",
+      "arguments": {
+        "minutes": 2
+      }
+    },
+    {
+      "tool": "finish",
+      "arguments": {}
+    }
+  ],
+  "expected_success": true
+}

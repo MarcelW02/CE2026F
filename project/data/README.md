@@ -1,64 +1,58 @@
 # Public data and case inspection
 
-The project supplies **nine dev cases and 24 public cases**. Dev has three cases
-per difficulty; Public has eight per difficulty. Final grading also includes
-24 hidden evaluation cases. The same tools and 100-point rubric apply to every team.
+The repository supplies **nine Dev cases and 30 fixed Public cases**: three and
+ten per difficulty, respectively. These support local development. This page and
+the full JSON examples are optional inspection references. See the
+[benchmark guide](../BENCHMARK.md#shared-cases-and-evaluation) for the official
+evaluation set.
 
-Start with [three readable examples](examples.md). For the kinds of changes your
-assistant should handle, read the [benchmark guide](../BENCHMARK.md). It also
-explains how to make optional local tests from an existing case.
-
-## What is in this folder?
+## Files
 
 | File | Contents |
 |---|---|
-| [`catalog.jsonl`](catalog.jsonl) | 33 records: one per dev/public case, with split, case ID, difficulty, initial request and initial source titles. |
-| [`examples.md`](examples.md) | One Basic, one Reactive and one Forecast example, showing actual requests, read sources and offers. |
-| [`MANIFEST.json`](MANIFEST.json) | Data version and file checksums. |
+| [`dev.json`](dev.json) | Nine complete Dev case definitions. |
+| [`public.json`](public.json) | Thirty fixed Public case definitions. |
+| [`catalog.jsonl`](catalog.jsonl) | Dev/Public case IDs, difficulty, initial requests and source titles. |
+| [`examples.md`](examples.md) | Optional full observations and search results for each difficulty. |
+| [`templates/`](templates/) | One editable case template and witness example per difficulty. |
+| [`MANIFEST.json`](MANIFEST.json) | Data version and checksums. |
 
-The catalogue contains initial inputs, without future event tapes, grading
-answers or solution plans. The public case definitions are readable in
-[`framework/fp_cases.py`](../framework/fp_cases.py). During a solver run, use only
-current observations and tool replies; do not look up future events or answers
-from a case definition.
+Complete definitions and templates contain future events and executable
+conditions. Use them to inspect or create tests, never as runtime solver inputs
+or case-ID answer tables. During a trip, the solver uses current observations and
+returned tool replies.
 
-## Inspect actual inputs with no model calls
+## Inspect without model calls
 
 Run from `project/`:
 
 ```bash
 python inspect_case.py --split dev
-python inspect_case.py --split public --tier forecast --case 1 --output runs/preview
+python inspect_case.py --split public --tier forecast --case 1 --output runs/preview_01
 ```
 
-The first command lists cases. The second shows the initial request, documents
-returned by read tools and available offers. A row number refers to the current
-split/tier list, starting at 1; you can also supply a case ID. `preview.md` is
-readable and `preview.json` retains actual tool replies. Reads advance virtual
-time, so each reply shows when it completed. Inspection needs no API key, makes
-no bookings and gives no model-performance score. Solver runs start fresh.
+The first command lists cases. The second reads current sources and searches
+available offers in a fresh world, writing `preview.md` and `preview.json`.
+A row number starts at 1 in the selected split/tier; a case ID also works. Reads
+advance virtual time. Inspection requires no API key, makes no model calls or
+bookings, and provides no performance score. A later solver run starts fresh.
 
-## Create your own optional local tests
+## Make a local test or a five-case submission
+
+For one optional local test:
 
 ```bash
 python inspect_case.py --split dev --case 1 --export-case local_cases/example.json
-python inspect_case.py --local-cases local_cases/example.json --case 1
 python run.py --local-cases local_cases/example.json --output runs/local_01
 ```
 
-The export copies one existing public case into a JSON list. It is a local test
-authoring file, so it includes the simulator definition and future event schedule.
-Keep those definitions out of solver inputs. Read the
-[authoring instructions](../BENCHMARK.md#make-your-own-local-tests) before changing
-facts. Local test files are ignored by Git and are not submitted or officially
-graded. They may be created freely alongside the three submitted solution files.
+For your five-case contribution, follow [the case guide](../CASE_GUIDE.md):
+copy templates into assigned slots, edit coherent conditions, run the cases,
+then package them from the successful report. The local runner accepts complete
+case lists or `{slot_id, case}` entries. Keep your case files and witnesses out
+of public repositories; email the case ZIP together with your solver ZIP to the
+existing course submission address.
 
-Dev and local runs show outcomes /90 and actual API cost. Only the complete
-24-case Public run, twice per case, receives a provisional /100 public score.
-Final grading runs one frozen submission on all 96 public-plus-hidden episodes.
-
-Public cases and self-authored tests can be overfit. Use the benchmark guide to
-cover different behaviors and inspect failures on each difficulty. Names and
-wording can change within the published contract; hidden cases add no secret
-criterion. No finite authored bank proves broad generalization, and valid
-numerical or symbolic solutions remain allowed.
+Dev and custom runs report outcome /90 and API usage. A complete Public run
+evaluates 30 cases twice and shows a local development score. Only official
+grading contributes to the leaderboard.

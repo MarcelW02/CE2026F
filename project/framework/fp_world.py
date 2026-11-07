@@ -5,7 +5,7 @@ import json
 
 from .fp_cases import FP_VERSION, fp_hash, FP_OUTCOME_POINTS, FP_OUTCOME_MAX, FP_SCORE_VERSION
 
-FP_TOOL_CONTRACT_REVISION = "catalog-read-20261105"
+FP_TOOL_CONTRACT_REVISION = "operational-travel-20261106"
 
 FP_TOOL_DURATIONS = dict(search=2, read=2, inquire=3, hold=1, confirm=2,
                         cancel=2, status=1, claim=2, wait=1, finish=0)
@@ -13,11 +13,11 @@ FP_TOOL_GUIDE = {
     "search": "Search current replacement outbound options. No arguments required.",
     "read": "Read a current source whose id is in source_catalog before submitting the batch. Read hotel-terms first, then request its bulletin in a later batch. A rejected read still takes two minutes. Forecasts describe current evidence, not guaranteed future outcomes.",
     "inquire": "Ask a provider about a topic. topic=hotel gives the waiver source; topic=traveler gives the latest request and consent; topic=transport gives the transfer source.",
-    "hold": "Temporarily reserve option id. Returns hold id and its expiry.",
-    "confirm": "arguments.id MUST be the returned hold-N id, not an option id. arguments.code MUST be the exact consent-N code in the request. arguments.key is a new caller-chosen stable string. Replaying that same id/code/key is idempotent.",
-    "cancel": "arguments.id is the confirmed booking-N id. arguments.code is the consent-N approval for cancelling your own replacement. Locked fares cannot be cancelled; fee fares retain their stated cancel_fee_usd; flexible fares refund fully. Repeated cancellation produces no additional refund. Preserve hotel and colleague-return.",
+    "hold": "Temporarily reserve option id. Returns hold id and expiry. A visible hold_fee_usd is charged now, credited once on confirmation, and retained if unused. Omission means a free hold.",
+    "confirm": "arguments.id MUST be the returned hold ID, not an option ID. arguments.code MUST be the exact approval code in the request. arguments.key is a new caller-chosen stable string. Replaying that same id/code/key is idempotent. Current conditional authorization applies when confirmation completes; prior approved purchases remain valid after a later limit reduction.",
+    "cancel": "arguments.id is the confirmed booking ID; code is the exact approval for cancelling your own replacement. A linked refund source overrides base fare fields, and its version freezes at confirmation. Evaluate those terms at cancellation completion. Without a rider, locked fares cannot be cancelled, fee fares retain cancel_fee_usd, and flexible fares refund fully. Repeated cancellation adds no refund. Preserve hotel and colleague-return.",
     "status": "Inspect confirmed bookings and holds, optionally by request key. A status read changes no booking.",
-    "claim": "arguments.topic MUST be the exact evidence type named in hotel-bulletin (not waiver-evidence). arguments.code is the exact proof-N from that source. arguments.version is its integer version. Leave other arguments null.",
+    "claim": "arguments.topic MUST be the exact evidence type named in hotel-bulletin. arguments.code is the exact evidence code from that source. arguments.version is its integer version. Leave other arguments null.",
     "wait": "Advance minutes of virtual time. Pending external notices will become observable.",
     "finish": "Complete handoff at or after handoff_minute. An early finish is rejected without advancing time. Stay responsive using wait until the handoff, then verify requirements and finish.",
 }

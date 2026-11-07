@@ -284,9 +284,9 @@ FP_EXTRACTION_PROMPT = (
 )
 
 FP_EXTRACTION_ROLE_PROMPTS = {
-    "transport": "Extract flight_transfer, train_transfer and coach_transfer from the read guide. They are minutes from arrival to the client meeting. If the guide gives one buffer for all arrivals, use it for every mode. A direct arrival in the meeting district needs zero. Also extract the applicable weather forecast percentage, possible extra arrival minutes and affected mode. A warning for an unrelated journey does not apply. If no forecast exists, use forecast_risk=0, forecast_delay=0, forecast_mode=none. Return only the requested fields.",
-    "hotel": "Extract the newest read bulletin's required evidence_type, literal evidence_code, and source bulletin_version. The category is the required item, such as cancel-reference or disruption-letter; it is never the document ID hotel-bulletin. Ignore an expired automatic waiver promise. Return only the requested fields.",
-    "traveler": "Extract the latest applicable meeting_minute (minutes since midnight), spending_limit (USD), literal outbound approval code, current-trip preferred_mode, requires_step_free, and avoid_carriers (exact names). Apply new or lifted restrictions to this lead outbound, including a confirmed replacement. Conditions for a colleague or later journey do not apply. Keep unrelated conditions when one field changes. New user notices supersede initial values. Convert written clock times. Distinguish hotel check-in from the client meeting. A one-trip train preference leaves future flight defaults intact. Return only the requested fields.",
+    "transport": "Interpret the required client arrival, terminal transfer minutes, realized weather, announced possible delays, and provider refund conditions. Keep every timing, replacement-hold and purchased-version condition. A forecast is a possibility, not realized weather. Use the exact requested schema; numeric deadlines and retained-dollar expressions are not yes/no predicates.",
+    "hotel": "Interpret the current hotel bulletin's exact evidence type, literal proof code and source version. Ignore archived examples. The evidence type is the required item, such as cancel-reference or disruption-letter, not the document ID. Return only the requested fields.",
+    "traveler": "Interpret the applicable total spending ceiling, literal outbound consent, preferred mode, access needs and excluded carriers. Preserve conditional permissions and unamended clauses. A limit applies to a new charge; it does not reverse an old payment. Conditions for a colleague or later journey do not apply. Return only the requested fields.",
 }
 
 
@@ -358,6 +358,9 @@ def run_travel_hybrid(world, api, config, route_fn=travel_route):
     Single and multi use the same sources, optimizer, writes, waits, and slots.
     They differ in combined vs separately scoped interpretation and routing.
     """
+    if world.observe().get("operational_sources"):
+        from .contract_policy import run_operational_hybrid
+        return run_operational_hybrid(world, api, config, route_fn)
     documents, state, traces, memory = {}, {}, [], {}
     rejected_claims = 0
     boot=world.batch([travel_action("search"),travel_action("read",id="transport-guide"),

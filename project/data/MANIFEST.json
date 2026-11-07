@@ -1,14 +1,22 @@
 {
-  "project_version": "travel-2026f-v9",
+  "project_version": "travel-2026f-v10",
   "mode": "offline_observed_inputs",
   "new_api_calls": 0,
   "splits": {
     "dev": 9,
-    "public": 24
+    "public": 30
   },
   "hidden_cases_included": 0,
   "files": {
-    "catalog.jsonl": "8ecb00a5e409a6c70210a8d0c147a9f2d6ef8450bc9da8f8a4588ba4984d10ee",
-    "examples.md": "91f7451f0b189615f18172bebf9569b57e8d22a7482ce0aaa495368dc21bdec3"
+    "catalog.jsonl": "fee54b6783453bbf88cfb9992c2a74c5677ec4497c493b74ab74507be3fc5b9b",
+    "dev.json": "d32f4080b9449bca319a265a1dc357e51d739da25993e60f191235b9725c143c",
+    "public.json": "57af2f096f7361157eec3afcbc60556a16e44274b364906d78509dc298361c49",
+    "examples.md": "698ace17039b2cd569afa8e0ca529a73ec3aaff825e1bfef20cc6c0a4b719500",
+    "templates/basic.json": "0804b7c07824545a51dce98556b5baeaade2cc5de4709c8779140edb064dc549",
+    "templates/basic_witness.json": "e78d0d07124858922e977d547c6c8504ab31a3d62dd73d31ea9e0617614216d6",
+    "templates/reactive.json": "c94b614063390333538ebf78ba4f7716dd9392df9e6e31129b8cd25901af0db8",
+    "templates/reactive_witness.json": "e723907632eb3acaf6a602ead0ee170d05c32670f34160880657b0c3ae5941b2",
+    "templates/forecast.json": "a11057a3f1a6c6c3caed9ac3e0807c4b61713859ea77473aca30d096f1a682ac",
+    "templates/forecast_witness.json": "91adb9aec2576dd68b2e361496a5f7befd203199eeddd478d0b670bc7aabe9ec"
   }
 }

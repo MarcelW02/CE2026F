@@ -1,5 +1,21 @@
 /TA/
 
+# Presentations are distributed separately from this source repository.
+/slides/
+/project/slides/
+*.ppt
+*.pptx
+*.pptm
+*.pps
+*.ppsx
+*.ppsm
+*.pot
+*.potx
+*.potm
+*.odp
+*.key
+CE2026F_Final_Project_Overview.pdf
+
 # Local API keys and environment-specific configuration, at any depth.
 .env
 .env.*
@@ -22,6 +38,7 @@ __pycache__/
 
 # Student-authored local test cases are not release or submission files.
 /project/local_cases/
+/project/case_proposals/
 
 # Temporary policy imports stay in this project directory.
 .runtime/

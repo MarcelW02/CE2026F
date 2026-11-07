@@ -1,0 +1,261 @@
+{
+  "version": "travel-2026f-v10",
+  "case_id": "dev-0712f477b1",
+  "seed": 914303,
+  "family": "refund_cutoff",
+  "difficulty": "reactive",
+  "variant": 303,
+  "city": "Port Amber",
+  "consent": "consent-914303",
+  "budget": 600,
+  "deadline": 720,
+  "preferred": "flight",
+  "requires_step_free": true,
+  "avoid_carriers": [],
+  "transfer": {
+    "flight": 20,
+    "train": 20,
+    "coach": 20
+  },
+  "hold_minutes": 16,
+  "interrupt_confirmation": false,
+  "waiver_type": "cancel-reference",
+  "waiver_code": "proof-914303",
+  "waiver_deadline": 30,
+  "booking_deadline": 12,
+  "handoff_minute": 28,
+  "horizon": 36,
+  "options": [
+    {
+      "id": "trip-7c5136ac505",
+      "mode": "coach",
+      "price": 210,
+      "arrival_minute": 500,
+      "carrier": "Cedar",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-1e387b7ab64",
+      "mode": "flight",
+      "price": 165,
+      "arrival_minute": 550,
+      "carrier": "Aster",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-5fcf56ff457",
+      "mode": "flight",
+      "price": 120,
+      "arrival_minute": 625,
+      "carrier": "Birch",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-de4054435d6",
+      "mode": "coach",
+      "price": 95,
+      "arrival_minute": 670,
+      "carrier": "Cedar",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-9b2440d7197",
+      "mode": "flight",
+      "price": 110,
+      "arrival_minute": 630,
+      "carrier": "Aster",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-4a4317da651",
+      "mode": "flight",
+      "price": 175,
+      "arrival_minute": 540,
+      "carrier": "Birch",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    }
+  ],
+  "events": [
+    {
+      "at": 16,
+      "kind": "user_update",
+      "text": "Read the updated spending and arrival contracts. Only the terms named in this update change; provider refund conditions and all other requirements continue.",
+      "changes": {
+        "operational_contract": {
+          "budget_limit": 190,
+          "arrival_deadline": 590
+        },
+        "operational_documents": [
+          {
+            "id": "request-contract",
+            "title": "Current spending approval",
+            "version": 2,
+            "text": "The total additional-spending ceiling is now USD 190. This is a replacement ceiling, not an extra amount on top of the old ceiling. Include any retained cancellation charge and any hotel fee. The provider's refund conditions and the current arrival obligation remain unchanged unless separately amended.",
+            "related": []
+          },
+          {
+            "id": "arrival-contract",
+            "title": "Current client arrival obligation",
+            "version": 2,
+            "text": "Reach the client by 09:50 including the current transfer. The earlier deadline is replaced. Keep step-free access and all other current outbound conditions.",
+            "related": []
+          }
+        ]
+      }
+    }
+  ],
+  "operational_contract": {
+    "budget_limit": 145,
+    "arrival_deadline": 675,
+    "refund_terms": {
+      "trip-de4054435d6": 65,
+      "trip-9b2440d7197": {
+        "op": "if",
+        "when": {
+          "op": "le",
+          "left": {
+            "var": "state.now"
+          },
+          "right": 23
+        },
+        "then": 0,
+        "else": 65
+      },
+      "trip-1e387b7ab64": 65,
+      "trip-7c5136ac505": 65,
+      "trip-4a4317da651": 65,
+      "trip-5fcf56ff457": {
+        "op": "if",
+        "when": {
+          "op": "le",
+          "left": {
+            "var": "state.now"
+          },
+          "right": 23
+        },
+        "then": 0,
+        "else": 65
+      }
+    }
+  },
+  "operational_sources": {
+    "budget_limit": "request-contract",
+    "arrival_deadline": "arrival-contract",
+    "refund_terms": {
+      "trip-de4054435d6": "fare-contract",
+      "trip-9b2440d7197": "fare-contract",
+      "trip-1e387b7ab64": "fare-contract",
+      "trip-7c5136ac505": "fare-contract",
+      "trip-4a4317da651": "fare-contract",
+      "trip-5fcf56ff457": "fare-contract"
+    }
+  },
+  "initial_request": "Repair my cancelled outbound to Port Amber. Prefer flight whenever a suitable flight is affordable. I require step-free travel. All listed carriers are permitted. Keep the existing hotel and my colleague's return unchanged, and claim the hotel charge waiver. Approval consent-914303 covers my outbound and its permitted cancellation, subject to the spending conditions in request-contract. Read arrival-contract for the binding arrival obligation, transport-guide for transfers, and fare-contract for actual cancellation refunds. A first confirmed replacement is required by virtual minute 12. I may send partial changes later. Keep checking current notices through minute 28 and finish by minute 36. Clock times and arrival minutes refer to local time after midnight; virtual minutes measure elapsed tool time. Spending authorization is checked when a charged action completes. A later lower allowance does not revoke an earlier authorized payment.",
+  "documents": {
+    "hotel-terms": {
+      "id": "hotel-terms",
+      "title": "Existing hotel charge",
+      "version": 1,
+      "text": "Keep the room. Read the linked hotel-bulletin for the current evidence that removes the USD 55 charge.",
+      "related": [
+        "hotel-bulletin"
+      ]
+    },
+    "hotel-bulletin": {
+      "id": "hotel-bulletin",
+      "title": "Hotel waiver evidence",
+      "version": 2,
+      "text": "Claim evidence type cancel-reference, code proof-914303, version 2, before virtual minute 30. A successful claim removes the USD 55 charge while retaining the room.",
+      "related": []
+    },
+    "traveler-profile": {
+      "id": "traveler-profile",
+      "title": "Lead outbound preferences",
+      "version": 1,
+      "text": "Use a suitable flight if one is affordable. Keep step-free access. The colleague's separate return and our existing hotel are outside this request.",
+      "related": []
+    },
+    "transport-guide": {
+      "id": "transport-guide",
+      "title": "Current client transfer",
+      "version": 1,
+      "text": "Add 20 minutes to terminal arrival for flight, train or coach. The result is arrival at the client, not terminal arrival.",
+      "related": []
+    },
+    "request-contract": {
+      "id": "request-contract",
+      "title": "Current spending approval",
+      "version": 1,
+      "text": "Total additional spending may not exceed USD 145. Count the current ticket, all amounts retained on earlier cancelled tickets, and any hotel charge still payable.",
+      "related": []
+    },
+    "arrival-contract": {
+      "id": "arrival-contract",
+      "title": "Current client arrival obligation",
+      "version": 1,
+      "text": "Reach the client by 11:15. Transfers in transport-guide count toward this deadline.",
+      "related": []
+    },
+    "fare-contract": {
+      "id": "fare-contract",
+      "title": "Cancellation charges and exceptions",
+      "version": 1,
+      "text": "Base fare fields describe ordinary cancellation: these fee fares normally retain USD 65. The following provider terms override that amount. They are fixed when each ticket is confirmed; the conditions are checked when cancellation actually completes. Cancellation uses the outbound consent. A hold is not a confirmed replacement, and overlapping confirmed outbounds remain forbidden.\nTicket trip-9b2440d7197: Cancellation completed by virtual minute 23, inclusive, receives a full refund. Later cancellation retains USD 65.\nTicket trip-5fcf56ff457: Cancellation completed by virtual minute 23, inclusive, receives a full refund. Later cancellation retains USD 65.\nTicket trip-1e387b7ab64: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-4a4317da651: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-de4054435d6: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-7c5136ac505: ordinary cancellation retains USD 65; there is no additional exception.",
+      "related": []
+    }
+  }
+}

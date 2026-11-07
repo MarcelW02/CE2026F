@@ -1,0 +1,222 @@
+{
+  "version": "travel-2026f-v10",
+  "case_id": "dev-486fd97b7c",
+  "seed": 914300,
+  "family": "mode_scoped_approval",
+  "difficulty": "basic",
+  "variant": 300,
+  "city": "Port Amber",
+  "consent": "consent-914300",
+  "budget": 600,
+  "deadline": 720,
+  "preferred": "flight",
+  "requires_step_free": true,
+  "avoid_carriers": [],
+  "transfer": {
+    "flight": 20,
+    "train": 20,
+    "coach": 20
+  },
+  "hold_minutes": 16,
+  "interrupt_confirmation": false,
+  "waiver_type": "cancel-reference",
+  "waiver_code": "proof-914300",
+  "waiver_deadline": 30,
+  "booking_deadline": 12,
+  "handoff_minute": 12,
+  "horizon": 36,
+  "options": [
+    {
+      "id": "trip-4e9fb32efeb",
+      "mode": "coach",
+      "price": 95,
+      "arrival_minute": 670,
+      "carrier": "Cedar",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-939577a7be5",
+      "mode": "flight",
+      "price": 175,
+      "arrival_minute": 540,
+      "carrier": "Birch",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-9a09af31b72",
+      "mode": "coach",
+      "price": 210,
+      "arrival_minute": 500,
+      "carrier": "Cedar",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-5902aa58008",
+      "mode": "flight",
+      "price": 110,
+      "arrival_minute": 630,
+      "carrier": "Aster",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-2b454b6ce15",
+      "mode": "flight",
+      "price": 120,
+      "arrival_minute": 625,
+      "carrier": "Birch",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-566a6bf73eb",
+      "mode": "flight",
+      "price": 165,
+      "arrival_minute": 550,
+      "carrier": "Aster",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    }
+  ],
+  "events": [],
+  "operational_contract": {
+    "budget_limit": {
+      "op": "if",
+      "when": {
+        "op": "eq",
+        "left": {
+          "var": "candidate.mode"
+        },
+        "right": "flight"
+      },
+      "then": 145,
+      "else": 105
+    },
+    "arrival_deadline": 655,
+    "refund_terms": {
+      "trip-4e9fb32efeb": 65,
+      "trip-939577a7be5": 65,
+      "trip-9a09af31b72": 65,
+      "trip-566a6bf73eb": 65,
+      "trip-2b454b6ce15": 65,
+      "trip-5902aa58008": 65
+    }
+  },
+  "operational_sources": {
+    "budget_limit": "request-contract",
+    "arrival_deadline": "arrival-contract",
+    "refund_terms": {
+      "trip-4e9fb32efeb": "fare-contract",
+      "trip-939577a7be5": "fare-contract",
+      "trip-9a09af31b72": "fare-contract",
+      "trip-566a6bf73eb": "fare-contract",
+      "trip-2b454b6ce15": "fare-contract",
+      "trip-5902aa58008": "fare-contract"
+    }
+  },
+  "initial_request": "Repair my cancelled outbound to Port Amber. Prefer flight whenever a suitable flight is affordable. I require step-free travel. All listed carriers are permitted. Keep the existing hotel and my colleague's return unchanged, and claim the hotel charge waiver. Approval consent-914300 covers my outbound and its permitted cancellation, subject to the spending conditions in request-contract. Read arrival-contract for the binding arrival obligation, transport-guide for transfers, and fare-contract for actual cancellation refunds. A first confirmed replacement is required by virtual minute 12. Verify the booking before handing it over at or after minute 12. Clock times and arrival minutes refer to local time after midnight; virtual minutes measure elapsed tool time. Spending authorization is checked when a charged action completes. A later lower allowance does not revoke an earlier authorized payment.",
+  "documents": {
+    "hotel-terms": {
+      "id": "hotel-terms",
+      "title": "Existing hotel charge",
+      "version": 1,
+      "text": "Keep the room. Read the linked hotel-bulletin for the current evidence that removes the USD 55 charge.",
+      "related": [
+        "hotel-bulletin"
+      ]
+    },
+    "hotel-bulletin": {
+      "id": "hotel-bulletin",
+      "title": "Hotel waiver evidence",
+      "version": 2,
+      "text": "Claim evidence type cancel-reference, code proof-914300, version 2, before virtual minute 30. A successful claim removes the USD 55 charge while retaining the room.",
+      "related": []
+    },
+    "traveler-profile": {
+      "id": "traveler-profile",
+      "title": "Lead outbound preferences",
+      "version": 1,
+      "text": "Use a suitable flight if one is affordable. Keep step-free access. The colleague's separate return and our existing hotel are outside this request.",
+      "related": []
+    },
+    "transport-guide": {
+      "id": "transport-guide",
+      "title": "Current client transfer",
+      "version": 1,
+      "text": "Add 20 minutes to terminal arrival for flight, train or coach. The result is arrival at the client, not terminal arrival.",
+      "related": []
+    },
+    "request-contract": {
+      "id": "request-contract",
+      "title": "Current spending approval",
+      "version": 1,
+      "text": "For my outbound, authorize total additional spending up to USD 145 when the purchased ticket is flight. For another mode, the total ceiling is USD 105. Each total includes retained cancellation charges and the hotel charge. A higher allowance for a different trip does not apply.",
+      "related": []
+    },
+    "arrival-contract": {
+      "id": "arrival-contract",
+      "title": "Current client arrival obligation",
+      "version": 1,
+      "text": "The client needs arrival by 10:55, including the terminal transfer. The optional lunch is at 11:40.",
+      "related": []
+    },
+    "fare-contract": {
+      "id": "fare-contract",
+      "title": "Cancellation charges and exceptions",
+      "version": 1,
+      "text": "Base fare fields describe ordinary cancellation: these fee fares normally retain USD 65. The following provider terms override that amount. They are fixed when each ticket is confirmed; the conditions are checked when cancellation actually completes. Cancellation uses the outbound consent. A hold is not a confirmed replacement, and overlapping confirmed outbounds remain forbidden.\nTicket trip-5902aa58008: Ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-2b454b6ce15: Ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-566a6bf73eb: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-939577a7be5: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-4e9fb32efeb: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-9a09af31b72: ordinary cancellation retains USD 65; there is no additional exception.",
+      "related": []
+    }
+  }
+}

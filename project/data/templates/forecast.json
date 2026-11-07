@@ -1,0 +1,273 @@
+{
+  "version": "travel-2026f-v10",
+  "case_id": "dev-17b13a1153",
+  "seed": 914306,
+  "family": "delay_refund",
+  "difficulty": "forecast",
+  "variant": 306,
+  "city": "Port Amber",
+  "consent": "consent-914306",
+  "budget": 600,
+  "deadline": 720,
+  "preferred": "flight",
+  "requires_step_free": true,
+  "avoid_carriers": [],
+  "transfer": {
+    "flight": 20,
+    "train": 20,
+    "coach": 20
+  },
+  "hold_minutes": 16,
+  "interrupt_confirmation": false,
+  "waiver_type": "cancel-reference",
+  "waiver_code": "proof-914306",
+  "waiver_deadline": 30,
+  "booking_deadline": 12,
+  "handoff_minute": 28,
+  "horizon": 36,
+  "options": [
+    {
+      "id": "trip-19702928b71",
+      "mode": "flight",
+      "price": 110,
+      "arrival_minute": 630,
+      "carrier": "Aster",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": true,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-d06ecadd99e",
+      "mode": "flight",
+      "price": 165,
+      "arrival_minute": 550,
+      "carrier": "Aster",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 14,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 20
+    },
+    {
+      "id": "trip-45c4a7c9c95",
+      "mode": "flight",
+      "price": 120,
+      "arrival_minute": 625,
+      "carrier": "Birch",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": true,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-425c52e126d",
+      "mode": "coach",
+      "price": 210,
+      "arrival_minute": 500,
+      "carrier": "Cedar",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-45621ec1460",
+      "mode": "coach",
+      "price": 95,
+      "arrival_minute": 670,
+      "carrier": "Cedar",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 36,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 0
+    },
+    {
+      "id": "trip-f0c97b3e7da",
+      "mode": "flight",
+      "price": 175,
+      "arrival_minute": 540,
+      "carrier": "Birch",
+      "step_free": true,
+      "comfort": 3,
+      "inventory": 2,
+      "expires_at": 14,
+      "available_from": 0,
+      "connection": "direct",
+      "change_policy": "fee",
+      "cancel_fee_usd": 65,
+      "weather_exposed": false,
+      "hold_fee_usd": 20
+    }
+  ],
+  "events": [
+    {
+      "at": 12,
+      "kind": "forecast_update",
+      "text": "Forecast version 2: the flight risk remains unresolved. This is not a spending-approval event.",
+      "changes": {
+        "forecast_version": 2,
+        "document_text": "The possible 40-minute delay remains uncertain. Wait for the actual operating notice at minute 18. Recovery sales still close at minute 14; an earlier live hold remains valid until its stated expiry."
+      }
+    },
+    {
+      "at": 18,
+      "kind": "weather_update",
+      "text": "Actual operations: the exposed flight departures are delayed by 40 minutes. Read the current operating notice; this is the realized delay.",
+      "changes": {
+        "weather_delays": {
+          "flight": 40
+        },
+        "forecast_version": 3,
+        "forecast_text": "Observed operating outcome at minute 18: flight delay 40 minutes. Recovery departures listed as unexposed retain their original arrival times."
+      }
+    }
+  ],
+  "operational_contract": {
+    "budget_limit": {
+      "op": "if",
+      "when": {
+        "op": "ge",
+        "left": {
+          "var": "state.weather.flight"
+        },
+        "right": 30
+      },
+      "then": 190,
+      "else": 145
+    },
+    "arrival_deadline": 675,
+    "refund_terms": {
+      "trip-45c4a7c9c95": {
+        "op": "if",
+        "when": {
+          "op": "ge",
+          "left": {
+            "var": "state.weather.flight"
+          },
+          "right": 30
+        },
+        "then": 0,
+        "else": 65
+      },
+      "trip-425c52e126d": 65,
+      "trip-f0c97b3e7da": 65,
+      "trip-19702928b71": {
+        "op": "if",
+        "when": {
+          "op": "ge",
+          "left": {
+            "var": "state.weather.flight"
+          },
+          "right": 30
+        },
+        "then": 0,
+        "else": 65
+      },
+      "trip-d06ecadd99e": 65,
+      "trip-45621ec1460": 65
+    }
+  },
+  "operational_sources": {
+    "budget_limit": "request-contract",
+    "arrival_deadline": "arrival-contract",
+    "refund_terms": {
+      "trip-45c4a7c9c95": "fare-contract",
+      "trip-425c52e126d": "fare-contract",
+      "trip-f0c97b3e7da": "fare-contract",
+      "trip-19702928b71": "fare-contract",
+      "trip-d06ecadd99e": "fare-contract",
+      "trip-45621ec1460": "fare-contract"
+    }
+  },
+  "initial_request": "Repair my cancelled outbound to Port Amber. Prefer flight whenever a suitable flight is affordable. I require step-free travel. All listed carriers are permitted. Keep the existing hotel and my colleague's return unchanged, and claim the hotel charge waiver. Approval consent-914306 covers my outbound and its permitted cancellation, subject to the spending conditions in request-contract. Read arrival-contract for the binding arrival obligation, transport-guide for transfers, and fare-contract for actual cancellation refunds. A first confirmed replacement is required by virtual minute 12. I may send partial changes later. Keep checking current notices through minute 28 and finish by minute 36. Read weather-forecast before the recovery sales close. The announced risk is uncertain; a later operating notice will report what actually happened. Clock times and arrival minutes refer to local time after midnight; virtual minutes measure elapsed tool time. Spending authorization is checked when a charged action completes. A later lower allowance does not revoke an earlier authorized payment.",
+  "documents": {
+    "hotel-terms": {
+      "id": "hotel-terms",
+      "title": "Existing hotel charge",
+      "version": 1,
+      "text": "Keep the room. Read the linked hotel-bulletin for the current evidence that removes the USD 55 charge.",
+      "related": [
+        "hotel-bulletin"
+      ]
+    },
+    "hotel-bulletin": {
+      "id": "hotel-bulletin",
+      "title": "Hotel waiver evidence",
+      "version": 2,
+      "text": "Claim evidence type cancel-reference, code proof-914306, version 2, before virtual minute 30. A successful claim removes the USD 55 charge while retaining the room.",
+      "related": []
+    },
+    "traveler-profile": {
+      "id": "traveler-profile",
+      "title": "Lead outbound preferences",
+      "version": 1,
+      "text": "Use a suitable flight if one is affordable. Keep step-free access. The colleague's separate return and our existing hotel are outside this request.",
+      "related": []
+    },
+    "transport-guide": {
+      "id": "transport-guide",
+      "title": "Current client transfer",
+      "version": 1,
+      "text": "Add 20 minutes to terminal arrival for flight, train or coach. The result is arrival at the client, not terminal arrival.",
+      "related": []
+    },
+    "request-contract": {
+      "id": "request-contract",
+      "title": "Current spending approval",
+      "version": 1,
+      "text": "The total spending allowance is USD 145. It rises to USD 190 only if an observed operating notice reports an actual flight delay of at least 30 minutes. A forecast or risk warning does not activate the supplement. Count retained cancellation charges and any hotel charge in either ceiling. No further permission is needed after the stated condition actually occurs.",
+      "related": []
+    },
+    "arrival-contract": {
+      "id": "arrival-contract",
+      "title": "Current client arrival obligation",
+      "version": 1,
+      "text": "Reach the client by 11:15. Transfers in transport-guide count toward this deadline.",
+      "related": []
+    },
+    "fare-contract": {
+      "id": "fare-contract",
+      "title": "Cancellation charges and exceptions",
+      "version": 1,
+      "text": "Base fare fields describe ordinary cancellation: these fee fares normally retain USD 65. The following provider terms override that amount. They are fixed when each ticket is confirmed; the conditions are checked when cancellation actually completes. Cancellation uses the outbound consent. A hold is not a confirmed replacement, and overlapping confirmed outbounds remain forbidden.\nTicket trip-19702928b71: A full refund is available when an actual flight delay of at least 30 minutes has been observed. A forecast alone does not qualify. Otherwise cancellation retains USD 65.\nTicket trip-45c4a7c9c95: A full refund is available when an actual flight delay of at least 30 minutes has been observed. A forecast alone does not qualify. Otherwise cancellation retains USD 65.\nTicket trip-d06ecadd99e: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-f0c97b3e7da: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-45621ec1460: ordinary cancellation retains USD 65; there is no additional exception.\nTicket trip-425c52e126d: ordinary cancellation retains USD 65; there is no additional exception.",
+      "related": []
+    },
+    "weather-forecast": {
+      "id": "weather-forecast",
+      "title": "Current disruption outlook",
+      "version": 1,
+      "text": "The flight operator reports a credible risk of a 40-minute delay to the exposed departures. This is a forecast, not an actual delay. A final operating notice is scheduled for minute 18. The two recovery departures are sheltered from this weather disruption, but their sales close at minute 14. A live hold remains usable after sales close until its own expiry. Each recovery hold charges USD 20 immediately. That USD 20 is credited toward the quoted ticket price if confirmed; an unused hold keeps the USD 20 charge. Other listed holds cost zero. A hold does not activate the emergency spending supplement. Plan the deposit as part of current spending.",
+      "related": []
+    }
+  }
+}

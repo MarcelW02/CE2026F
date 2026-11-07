@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 
 from framework.fp_inputs import select_cases, load_local_cases
-from framework.fp_world import TravelWorld, travel_action
+from framework.world_factory import world_for_case
+from framework.fp_world import travel_action
 
 
 def preview_case(case):
-    world = TravelWorld(case)
+    world = world_for_case(case)
     initial = world.observe()
     world.batch([travel_action("read", id=source) for source in
                  ("hotel-terms", "transport-guide", "traveler-profile")])

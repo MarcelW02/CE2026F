@@ -13,7 +13,7 @@ def save_report(directory, report, key=None):
     temporary.write_text(text); temporary.replace(directory / "results.json")
     result = report.get("result", {})
     rows = result.get("rows", report.get("partial_rows", []))
-    fields = ("case_id", "tier", "repeat", "outcome_points", "outcome_max", "quality", "success", "virtual_minutes", "net_transport_spend_usd", "retained_cancel_fees_usd", "error_type")
+    fields = ("case_id", "tier", "repeat", "outcome_points", "outcome_max", "quality", "success", "virtual_minutes", "net_transport_spend_usd", "retained_cancel_fees_usd", "uncredited_hold_deposits_usd", "retained_hold_fees_usd", "total_refunds_usd", "error_type")
     with (directory / "cases.csv").open("w", newline="") as out:
         writer = csv.DictWriter(out, fieldnames=fields); writer.writeheader()
         writer.writerows({k: row.get(k) for k in fields} for row in rows)
@@ -23,7 +23,11 @@ def save_report(directory, report, key=None):
     table = "<table><tr>" + "".join("<th>" + esc(k) + "</th>" for k in fields) + "</tr>"
     table += "".join("<tr>" + "".join("<td>" + esc(r.get(k)) + "</td>" for k in fields) + "</tr>" for r in rows) + "</table>"
     grade = report.get("grade")
-    summary = "Provisional public score: " + str(round(grade["score"], 2)) + " / " + str(grade["max_score"]) if grade else "Diagnostic run; no provisional public grade."
+    if grade:
+        label = "Official Public + Hidden score" if report.get("split") == "combined" else "Local Public development score"
+        summary = label + ": " + str(round(grade["score"], 2)) + " / " + str(grade["max_score"])
+    else:
+        summary = "Diagnostic or interrupted run; no /100 score."
     if not grade and result.get("complete"):
         summary = (str(report.get("split")) + " diagnostic: mean travel outcome "
             + str(round(result["outcome_points"], 2)) + " / 90; no official /100 grade.")

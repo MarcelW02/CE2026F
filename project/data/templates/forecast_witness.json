@@ -1,0 +1,150 @@
+{
+  "steps": [
+    {
+      "batch": [
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "hotel-terms"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "request-contract"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "arrival-contract"
+          }
+        }
+      ]
+    },
+    {
+      "batch": [
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "hotel-bulletin"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "transport-guide"
+          }
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "fare-contract"
+          }
+        }
+      ]
+    },
+    {
+      "batch": [
+        {
+          "tool": "claim",
+          "arguments": {
+            "topic": "cancel-reference",
+            "code": "proof-914306",
+            "version": 2
+          }
+        },
+        {
+          "tool": "search",
+          "arguments": {}
+        },
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "weather-forecast"
+          }
+        }
+      ]
+    },
+    {
+      "tool": "hold",
+      "arguments": {
+        "id": "trip-19702928b71"
+      }
+    },
+    {
+      "tool": "confirm",
+      "arguments": {
+        "id": {
+          "$ref": "steps.3.hold.id"
+        },
+        "code": "consent-914306",
+        "key": "witness-first"
+      }
+    },
+    {
+      "tool": "status",
+      "arguments": {
+        "key": "witness-first"
+      }
+    },
+    {
+      "tool": "hold",
+      "arguments": {
+        "id": "trip-d06ecadd99e"
+      }
+    },
+    {
+      "tool": "wait",
+      "arguments": {
+        "minutes": 7
+      }
+    },
+    {
+      "batch": [
+        {
+          "tool": "read",
+          "arguments": {
+            "id": "weather-forecast"
+          }
+        }
+      ]
+    },
+    {
+      "tool": "cancel",
+      "arguments": {
+        "id": {
+          "$ref": "steps.5.booking.id"
+        },
+        "code": "consent-914306"
+      }
+    },
+    {
+      "tool": "confirm",
+      "arguments": {
+        "id": {
+          "$ref": "steps.6.hold.id"
+        },
+        "code": "consent-914306",
+        "key": "witness-repair"
+      }
+    },
+    {
+      "tool": "status",
+      "arguments": {
+        "key": "witness-repair"
+      }
+    },
+    {
+      "tool": "wait",
+      "arguments": {
+        "minutes": 3
+      }
+    },
+    {
+      "tool": "finish",
+      "arguments": {}
+    }
+  ],
+  "expected_success": true
+}

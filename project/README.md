@@ -1,205 +1,120 @@
-# Travel planning with dynamic replanning
+# Student guide
 
-Build a travel assistant that interprets changing requests and sources, makes
-approved bookings, repairs them when needed, and verifies the trip through
-handoff. Use the supplied dev cases to begin, then make optional local tests
-for the kinds of failures described in the benchmark guide. Final grading reruns
-your submitted source on public and hidden cases for a score out of 100.
+Use this guide as a reference for the scaffold, tools and score. Start with the
+[repository README](../README.md) for setup and the submission checklist.
 
-**Final submission: December 21, 2026 (KST).** The exact deadline time will be
-announced separately.
+## 1. Set up and run
 
-**All final presentations are online via Zoom; no on-site attendance is required.**
-Read the [October 22 project updates](../README.md#project-updates) for the
-current model/API choices and common clarifications.
+Follow the [repository setup](../README.md#start-here), using your own distributed
+course key. Run commands from `project/`. Begin with `python run.py --offline`,
+then inspect a Dev case before making a small paid run. The report records what
+the solver saw, did and spent. Use a fresh output path for every experiment.
 
-**October 22 update:** `gpt-6-luna` is now allowed for Responses, and the optional
-Decisions API is available through `api.decide`. Get the updated project release
-before using these methods; keep the protected framework unchanged. Your own
-previously issued course API key is the setup key. The default starter and scoring contract remain the same. See section 4 for the two interfaces.
+## 2. Your files and the provided scaffold
 
-**November 5 source-access correction:** Complete `hotel-terms` before reading
-its bulletin in a later batch. Read requests now require the source to be in the
-current catalog before that batch is submitted. Update the framework, test, and
-package your next submission again. This correction is identified as
-`catalog-read-20261105`. See the [update notes](../README.md#project-updates).
-
-**November 3 benchmark update — `travel-2026f-v9`:** Basic remains the first
-milestone. Reactive and Forecast cases now require more preparation:
-compare repair costs, remember announced booking windows and preserve a backup
-before an uncertain disruption resolves. Some requirements come from linked
-sources and later messages may update only one field. See
-[`BENCHMARK.md`](BENCHMARK.md) for examples. The tools, score formula, fixed cost
-allowances and three submitted files are unchanged. Back up your solution files
-before updating, then test and resubmit your adapted solution. Earlier-version
-scores stay separate; compare implementations on the same case bank.
-
-The starter is runnable. You can begin with prompts and configuration, then
-extend routing, memory or the action loop as your experiments identify failures.
-
-## 1. Install and check the setup
-
-Use Python 3.11 or later. From the repository root:
-
-```bash
-cd project
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-cp .env.example .env
-```
-
-Windows activation: `.venv\Scripts\activate`, or
-`.venv\Scripts\Activate.ps1` in PowerShell. PowerShell can copy the template with
-`Copy-Item .env.example .env`.
-
-Open `.env` in your editor and replace the placeholder with your own course API
-key, which has already been distributed to you. Keep it local:
-
-```dotenv
-OPENAI_API_KEY=PASTE_YOUR_KEY_HERE
-```
-
-`run.py` reads `project/.env`; an existing `OPENAI_API_KEY` environment variable
-takes precedence. Do not put a real key in a Python file or commit it.
-
-Check the simulator without a model request:
-
-```bash
-python run.py --offline
-```
-
-It prints `Offline simulator inspection: zero API calls; no model grade.` and
-shows a source change as virtual time advances. This confirms local imports and
-tools work; it does not measure model quality.
-
-Then make a small paid setup check:
-
-```bash
-python run.py --split dev --limit 2 --output runs/setup_check
-```
-
-Open `runs/setup_check/report.html` in a browser. These first two basic cases are
-a setup check; run all nine dev cases to see dynamic situations.
-
-Every paid run has a 1000-call / estimated USD 2 guard, a 180-second request
-timeout and zero automatic retries. A rerun makes new paid calls. Always choose
-a fresh output directory so earlier evidence is preserved.
-
-## 2. Know which files to edit
-
-```text
-project/
-  solution/
-    config.py             EDIT: model/settings and policy choices
-    prompts.py            EDIT: task and role instructions
-    policy.py             EDIT: routing, memory, planning and agent loop
-    __init__.py           Keep unchanged
-  framework/              READ: common tools, world, public cases and evaluator
-  run.py                  Keep unchanged: dev/public and optional local runner
-  inspect_case.py          Keep unchanged: view observed case data; no API calls
-  BENCHMARK.md            READ: task variations and local test authoring
-  data/                   READ: public case catalogue and examples
-  local_cases/            OPTIONAL: your own test JSON files; ignored by Git
-  submit.py               Keep unchanged: submission packager
-  RELEASE_MANIFEST.json   Keep unchanged: release hashes and edit allowlist
-  requirements.txt        Keep unchanged: runtime dependencies
-  .env.example            Placeholder template
-  .env                    Your local key; ignored by Git
-  runs/                   Generated reports; ignored by Git
-  submissions/            Generated source ZIPs; ignored by Git
-```
-
-**Your submitted implementation is exactly three files:**
-
-You may change any of these files; changing all three is not required.
-
-| File | What you can change |
+| File | What you may change |
 |---|---|
-| [`solution/config.py`](solution/config.py) | Model and supported controls, architecture, context refresh, concurrency, routing threshold and policy budgets. |
-| [`solution/prompts.py`](solution/prompts.py) | `PROJECT_PROMPT` and `ROLE_PROMPTS`: how evidence and previous fields should be interpreted. |
-| [`solution/policy.py`](solution/policy.py) | `route()` and `solve()`, plus any extra functions/classes needed by your design. |
+| `solution/config.py` | Model/settings, architecture, refresh, routing and policy budgets. |
+| `solution/prompts.py` | `PROJECT_PROMPT` and `ROLE_PROMPTS`. |
+| `solution/policy.py` | `route()`, `solve()` and helpers inside this file. |
 
-Keep submitted helper functions and classes inside these files. Use the Python
-standard library, public framework helpers and packages in `requirements.txt`.
-Additional packages, helper modules, local assets and test JSON are not installed
-or copied from your submission. You may freely create local test JSON files in
-`local_cases/`; those files are not submitted. Read the shared implementation
-freely while keeping it unchanged.
-Final grading runs the three submitted files under the published tools and
-evaluation rules.
-Changes outside the allowlist are review/rerun candidates, not automatic deductions.
+Only these three Python files enter the submitted solver. Framework, evaluator,
+accounting, datasets, runners, packagers and release manifest stay unchanged.
+Source checks identify review/rerun candidates; they do not establish authorship.
+Use the Python standard library, public framework and `requirements.txt` packages.
+Extra modules/assets are not copied or installed from a submission.
 
-The starter already reads sources, keeps local state, compares numeric options,
-books, checks status and monitors the trip. It delegates that working loop from
-`solve()`. You may keep it and improve its context handling; a full rewrite is
-optional. Its `REFRESH_CONTEXT=False` leaves model-extracted fields frozen after
-the first interpretation, giving you a concrete place to begin.
+Separately, create your team's five JSON cases under `local_cases/` using the
+[case guide](CASE_GUIDE.md). Submit them in their own ZIP with your solver.
 
-The two useful starter architectures are `hybrid_single` (one combined
-interpreter) and `hybrid_multi` (combined or separately scoped calls). They use
-the same three tool slots and numeric planner. Concurrent model requests can
-reduce wall-clock waiting; they do not advance or save virtual trip minutes.
+The provided hybrid loop handles source discovery, timed reads, offer search,
+local arithmetic, holds, bookings, status checks and monitoring. For operational
+cases it interprets conditional terms instead of assuming one budget number.
+`REFRESH_CONTEXT=False` deliberately retains the first interpretation. Set it to
+`True` to test updates; this is a first experiment, not a guarantee of success.
 
-In the supplied hybrid, these editable prompts have different paths:
-
-| Prompt | When it is used |
-|---|---|
-| `PROJECT_PROMPT` | Appended to every hybrid extraction request. |
-| `ROLE_PROMPTS["transport"]`, `["hotel"]`, `["traveler"]` | Used for separate scoped calls in non-Basic `hybrid_multi` episodes when the number of requested domains is at least `ROUTE_THRESHOLD`. |
-
-Basic always uses the provided combined extraction instructions plus
-`PROJECT_PROMPT`. `hybrid_single` and combined fallback calls use that same
-combined path, so editing only `ROLE_PROMPTS` does not change those requests.
-Inspect the saved API request's role and instructions to check which prompt ran.
-
-## 3. Understand the travel task
-
-The lead traveler's outbound was cancelled. Arrange a replacement to a fictional
-client meeting while preserving the existing hotel and colleague's return.
-Respect the latest meeting time, transfers, spending approval, feasible mode
-preference, accessibility and carrier restrictions. Remove the pending USD 55
-hotel fee using the current evidence procedure.
-
-An instruction for the colleague or a later journey is not automatically a rule
-for this outbound. New instructions may lift old restrictions as well as add them.
-The spending check happens when `confirm` commits a booking. It uses the limit
-then in effect, transport spending left after refunds and any pending hotel fee.
-A hold does not keep an older spending approval. A later budget reduction does
-not invalidate an earlier approved purchase. Meeting, access and carrier checks
-use the latest requirements at handoff, so those updates can make an earlier
-booking unsuitable. Outbound approval never authorizes changing the protected
-bookings.
-
-| Difficulty | What changes | Your planning responsibility |
+| Memory or responsibility | Provided | You can improve |
 |---|---|---|
-| Basic | No later external notices. | Choose an eligible itinerary, resolve the hotel fee and verify completion. |
-| Reactive | Meeting, budget, preference, evidence, inventory, transfers or traveler scope. | Confirm a first outbound by minute 14, then update and repair through handoff. |
-| Forecast | Reactive constraints plus revised weather advisories, fare contracts and recovery windows. | Confirm by minute 12, preserve feasible recovery, and handle later observed changes. |
+| World state | Bookings, holds, spending, current notices and source catalog. | Read it through `world`; do not access the underlying case or future events. |
+| Episode memory | Observed offers, read documents and source versions. | Which facts to retain, re-read or pass to each role. |
+| Interpretation | Structured conditional terms and current ordinary facts. | Prompts, routing, conflict handling and validation. |
+| Purchased terms | Saved refund interpretation and the source version read at purchase. | Preserve the evidence when later versions replace it. |
+| Planning | Numerical candidate checks and a simple forecast preparation policy. | Better timing, recovery choices and cost-aware preparation. |
+| Verification | Status and final-state checks in the supplied loop. | Recovery from incomplete tool replies and better monitoring. |
 
-Basic permits immediate verified handoff. Reactive and forecast cases monitor
-through virtual minute 24. Every episode finishes by minute 36. Fee cutoffs and
-offer windows can be earlier, so read the actual case requirements.
-There is no reward for checking every minute; monitor when it preserves the
-service obligation and time for a useful repair.
+Memory lasts for **one trip only**. Each case execution, including a repeat,
+starts in a fresh process in both local and official evaluation. Keep the trip's
+facts, source versions, bookings and action history in your episode memory.
+You may reuse an interpretation within that trip while its source and relevant
+prompt/settings remain unchanged. Re-read or reinterpret it when those change.
 
-Search results state the fare contract:
+Do not carry memory or saved interpretations into another case or run, load
+answers by case ID, or use case-definition files, future schedules or evaluator
+truth to guide the solver. Every model call used to create or refresh memory
+must use the supplied API and counts toward that case's cost. The returned
+`working_memory`, `context` and `traces` are saved for inspection.
 
-- `locked`: cancellation and exchange are rejected after confirmation.
-- `fee`: approved cancellation refunds the paid fare minus `cancel_fee_usd`.
-- `flexible`: approved cancellation refunds the whole fare.
+You may replace the loop and memory design in `policy.py`; a custom class is
+optional. Case authors can inspect definition files while designing tests;
+a running solver uses only its observed inputs.
 
-Cancel your existing replacement before confirming another. Retained fare fees
-remain part of spending even after the ticket is replaced. A valid hold protects
-its quoted inventory until the hold deadline. Quotes also state when they open
-and close; do not assume a later alternative remains available indefinitely.
+`hybrid_single` uses one combined interpreter. `hybrid_multi` can send different
+observed source groups to traveler, transport and hotel roles, then share their
+outputs with the numerical planner. Basic uses a combined interpretation.
+`PROJECT_PROMPT` applies to interpretation requests; role prompts affect the
+scoped path when routing selects it. Look at saved API instructions to see which
+prompt ran. Concurrent API requests change wall-clock waiting, not virtual trip
+time or the three shared tool slots. No score requires a particular agent count.
 
-A weather forecast is uncertain evidence for a stated traveler, journey and mode.
-Its percentage and possible additional duration are not an observed delay.
-Later reports can revise the watch or report what actually happened. Current
-search and booking arrivals already include observed physical delays; do not add
-them twice. Authored false alarms and disruptions are not an empirical weather
-calibration dataset. A valid robust hedge is allowed.
+## 3. Understand the trip
+
+The lead traveler's outbound was cancelled. Arrange a replacement that meets the
+current meeting, access and carrier requirements. Preserve the existing hotel
+and colleague's return. Remove the pending USD 55 hotel fee with the applicable
+evidence, and use only the traveler-approved spending authority.
+
+Read the actual current sources. An instruction for a colleague or a later trip
+does not automatically apply here. An amendment can replace one condition while
+leaving others active. Exact approval and evidence strings come from observed
+sources; do not assume their prefixes or lengths.
+
+| Level | Main decision |
+|---|---|
+| Basic | Interpret a stable request and contract, choose a suitable trip and verify it. |
+| Reactive | Meet the first-booking deadline, then repair the trip after observed changes. |
+| Forecast | Plan before an uncertain change, including fare terms and closing recovery windows. |
+
+Cases run for at most 36 virtual minutes with three tool slots. The supplied
+operational examples require first booking by minute 12. Their Basic handoff
+starts at minute 12; advanced examples monitor through minute 28. Basic has no
+later external updates. Read the case's actual cutoffs;
+a hotel deadline or sale window can close earlier. A forecast is a possibility,
+not an observed delay. Search and booking arrivals already include realized
+delays; do not add them again.
+
+Some spending permissions depend on the chosen carrier, mode, arrival, price
+comparison or a live reservation. The engine checks the **total spending ceiling
+at the completion of a paid hold or confirmation**. Total spending includes
+retained charges and the pending hotel fee. An old purchase that was approved at
+the time remains approved after a later limit reduction. Current arrival, access
+and carrier requirements still matter at handoff.
+
+Search displays the base fare (`locked`, `fee` or `flexible`), any reservation
+deposit and a link to relevant terms. Read conditional riders before relying on
+a refund. A rider's terms freeze when the ticket is confirmed; the condition is
+evaluated against the real facts when cancellation completes. A later source
+version does not rewrite a purchased ticket's terms.
+
+A paid hold charges its visible deposit immediately. Confirmation credits that
+deposit **once** toward the quoted fare; an unused deposit remains spending.
+Holding every option can therefore waste the budget. There is no arbitrary
+hold-count limit. Cancel the current replacement before confirming another, and
+use `status` after an uncertain confirmation reply. A valid hold protects quoted
+inventory only until its own expiry.
+
+A source must already be in the current catalog before submitting a `read` batch.
+For example, complete `hotel-terms` before requesting its linked bulletin in a
+later batch. Failed reads still consume time.
 
 ## 4. Use the supplied tools and API
 
@@ -338,228 +253,96 @@ event tape for a given case. Do not use future event definitions, `_spec`, `_rul
 evaluator answers or case-ID lookup tables to choose actions. Public case code is
 available for inspection; the solver still operates through the observed interface.
 
-## 5. Manage context and memory
+## 5. Inspect the data
 
-The simulator owns bookings and finances. A local dictionary cannot change a
-reservation; only an approved tool action does that.
+Nine Dev cases illustrate the three difficulty levels. Thirty fixed Public cases
+provide larger development examples. Use:
 
-The supplied hybrid creates these stores inside each episode:
+```bash
+python inspect_case.py --split dev --case 1
+python inspect_case.py --split public --case 1
+python inspect_case.py --split dev --case 1 --export-case local_cases/example.json
+```
 
-| Store | Contents |
-|---|---|
-| `documents` | Read source text and version, keyed by source ID. |
-| `state` | Interpreted meeting, budget, approval, preference, access, carriers, transfers, waiver and forecast fields; observed net spending. |
-| `memory` | Routing metadata: previous interpretation time/revision and pending hotel work. |
-| `options` | Current numeric search results. |
-
-Model inputs explicitly contain selected sources, relevant notices and previous
-fields. There is no implicit conversation memory or required database. Diagnostic
-traces are not automatically included in the next model request.
-
-With `REFRESH_CONTEXT=False`, the supplied hybrid skips later model extraction,
-while live observations, coded source rereads and financial updates still occur.
-`True` enables selective reinterpretation. New extracted fields overwrite matching
-entries; the scaffold does not provide a general conflict resolver, per-field
-provenance/confidence or automatic forgetting.
-
-`route(observation, memory)` returns any needed domains: `transport`, `hotel`,
-`traveler`. In the supplied loop it receives a **copy of routing metadata**, not
-the full `state` or `documents`; edits to that argument do not persist.
-
-To design another memory representation, merge policy, compression strategy or
-action loop, replace `solve()` inside `solution/policy.py`. Initialize episode
-memory inside `solve()`; module globals are not reset between episodes. Return
-a JSON-serializable dictionary, for example `{"traces": [], "working_memory": memory, "context": state}`. Call
-`world.call("finish")` after the required monitoring and verification. Wait for
-all model calls you started to complete before returning from `solve()`; do not
-leave background requests running. A full rewrite is optional, and memory format
-itself is not graded.
-
-Keep the current task together with the evidence needed for the next action.
-Follow source references when a request leaves a field to another document.
-Merge partial amendments without resetting unrelated conditions. Remember an
-announced booking window even if no alert arrives when it opens. Before buying
-the cheapest ticket, check whether its cancellation fee leaves enough approved
-spending for a useful replacement. A held backup may let you wait for new
-information without cancelling a still-valid trip. These are policy choices
-inside the same three editable files; no new memory class is required. See the
-examples in [BENCHMARK.md](BENCHMARK.md).
+Inspection makes no model calls. [BENCHMARK.md](BENCHMARK.md) explains the supported
+variation. Public definition files contain authoring programs and future events;
+these are for test development and evaluation, never solver inputs.
 
 ## 6. Improve with visible experiments
 
-Read [BENCHMARK.md](BENCHMARK.md) for the scenario families, what can vary and
-how to author useful local tests. The supplied cases are:
-
-| Set | Distinct cases | Repeats | Purpose |
-|---|---:|---:|---|
-| Dev | 9, three per level | 1 | Setup and small experiments. |
-| Public | 24, eight per level | 2 | 48 episodes; provisional local development score /100. |
-| Hidden evaluation | 24, eight per level | 2 | Official staff evaluation with Public, including interim leaderboard entries. |
-| Your local cases | You choose | 1 | Optional diagnostic tests; no official grade. |
-
-The [data guide](data/README.md) and [three examples](data/examples.md) show
-readable input data. [`data/catalog.jsonl`](data/catalog.jsonl) lists the initial
-requests and source titles for all 33 student-visible cases. Inspect a case
-without an API key:
-
 ```bash
-python inspect_case.py --split dev
-python inspect_case.py --split public --tier forecast --case 1 --output runs/preview
+python run.py --split dev --limit 2 --output runs/dev_small
+python run.py --split dev --output runs/dev_01
+python run.py --local-cases local_cases/example.json --output runs/local_01
+python run.py --split public --output runs/public_01
 ```
 
-Without `--case`, inspection lists matching cases. Use a case ID or the number
-in that list, starting at 1. Inspection prints the actual request, read source
-text and search offers, with their observation times. Tool reads advance virtual
-time. It makes no model calls and does not reveal the future event tape or a
-solution. Solver runs start fresh and read their own evidence.
+Open each `report.html`. Start with criterion and difficulty scores, then inspect
+a failing episode's tool history, saved memory, model inputs and actual replies.
+Check whether the right source version reached the role that needed it. Compare
+one change at a time: refresh, source selection, prompt, model, planning or timing.
+Keep some self-authored examples aside during development. Public cases can be
+overfit; a good exposed-bank score is not proof of broad generalization.
 
-1. Try one controlled context-refresh experiment:
+Dev, local and filtered runs report outcome /90, success, token use and both cost
+measures. Only a complete unfiltered Public run receives the local /100 score.
+That score is not the official leaderboard result. Every official evaluation covers 30 fixed Public, 30 team-contributed and
+60 independent Hidden cases, once each. All teams use the same evaluation set.
 
-   ```bash
-   python run.py --split dev --tier reactive --limit 1 --output runs/reactive_frozen_01
-   ```
-
-   Keep the other starter values and change only `REFRESH_CONTEXT` in
-   `solution/config.py` from `False` to `True`. Then run the same case again:
-
-   ```bash
-   python run.py --split dev --tier reactive --limit 1 --output runs/reactive_refresh_01
-   ```
-
-   Open both `report.html` files. Compare the later traveler notices, interpreted
-   meeting time, final booking, outcome /90 and both cost estimates. This tests whether
-   refreshed interpretation helps this case. One pair of model runs does not
-   establish a stable improvement; there is no promised result.
-
-2. Read the report in this order:
-
-   - Start with **Criterion scores**, **Scores by difficulty** and **Episode
-     results**. A failed episode can still earn useful partial credit.
-   - Expand the failing case's **tools and solver context**. Compare `checks`
-     with the actual `history` and the fields returned under `solver`.
-   - Expand **Every API request, actual reply and token usage** for the exact
-     request role, prompt, reply and cost estimates. Check that the prompt you edited ran.
-   - Expand **Outcome components and usage** for aggregate success, token usage and both cost estimates.
-
-   Run all dev cases before judging the design:
-
-   ```bash
-   python run.py --split dev --output runs/dev_01
-   ```
-
-   Then improve one part at a time: when to refresh, which evidence each role
-   gets, prompt length, model settings, or how new facts replace old state.
-   More advanced choices include fact/source tracking, conflict handling,
-   forecast/fare planning and a custom loop. Compare each difficulty and API
-   cost. Keep working scaffolding until an observed failure calls for a change.
-
-3. If helpful, make your own local test by copying one supplied case:
-
-   ```bash
-   python inspect_case.py --split dev --case 1 --export-case local_cases/example.json
-   python run.py --local-cases local_cases/example.json --output runs/local_01
-   ```
-
-   This exports one existing public case as a JSON list. Edit a copy using the
-   [local authoring guide](BENCHMARK.md#make-your-own-local-tests), then inspect
-   and run it. New wording is a useful first change. Changes to facts also need
-   matching text, document values and event changes. Local test files are optional
-   and are not submitted. Keep the official framework and datasets unchanged.
-
-4. Keep some of your local cases aside while improving the solution. Test the
-   same source and settings on those cases before changing them again. A small
-   authored test set can expose failures but does not prove broad generalization.
-
-5. Run the complete Public bank when ready:
-
-   ```bash
-   python run.py --split public --output runs/public_01
-   ```
-
-Dev, local and filtered/subset runs show mean outcomes /90, criterion and
-difficulty results, full success, actual token usage, grading cost and estimated
-API cost. They do not apply the
-full Public bank's cost reference to a different case set. Only a complete,
-unfiltered Public run receives the provisional /100 local development score.
-This is not the official leaderboard score: staff evaluate Public plus Hidden,
-96 episodes in total, for both interim entries and final grading. Use `--tier`
-or `--limit` for smaller diagnostics.
-
-Runs preserve the source snapshot, configuration, actual replies, tool history,
-tokens and estimated cost. `results.json`, `cases.csv` and `report.html` are
-created evidence, not code to edit or required submissions. Choose a fresh output
-directory for each run. Rerunning a model evaluation makes new paid calls.
-
-If an API timeout, connection, authentication or budget interruption occurs, keep
-the partial record and resolve the cause before a fresh run. Unknown usage/cost
-blocks a complete score. There is no automatic paid retry or engine fallback.
-A real API interruption is different from the simulated provider's missing
-confirmation reply.
+Runs save source/configuration snapshots, actual requests/replies, actions and
+costs. Saved outputs are evidence, not files to edit or required source submissions.
+A new paid run makes new requests. Resolve an API setup, timeout, connection,
+authentication, rate-limit or spending interruption before starting a fresh run.
+Unknown usage blocks a complete score; no automatic paid retry or endpoint
+fallback follows an infrastructure error. A bounded repair of a model's content
+mistake is allowed, with every request counted.
 
 ## 7. Understand the 100-point score
 
-The evaluator checks state and history and accepts any itinerary that meets the
-published contract:
-
 | Criterion | Points | What is checked |
 |---|---:|---|
-| Usable arrival | 40 | One confirmed outbound, eligible under current access/carrier rules, reaches the latest meeting including transfers. |
-| Current requests | 20 | Five each: approved spending including retained fees, feasible preferred mode, required access, permitted carriers. |
-| Hotel waiver | 10 | Applicable evidence/version accepted before cutoff while preserving the room. |
+| Usable arrival | 40 | One confirmed, eligible outbound reaches the current required meeting, including transfers. |
+| Current requests | 20 | Five each: approved spending, feasible preferred mode, access and permitted carrier. |
+| Hotel waiver | 10 | Applicable evidence/version accepted before cutoff, with the room preserved. |
 | Safety | 10 | Authorized actions, protected bookings preserved, no duplicate outbound. |
-| Reliable handoff | 10 | First confirmation on time, confirmation outcome verified, monitoring and handoff complete. |
-| API efficiency | 10 | Grading cost relative to a fixed recorded benchmark, with cached input charged at the regular input rate. |
+| Reliable handoff | 10 | Timely first booking, verified result, monitoring and complete handoff. |
+| API efficiency | 10 | Shared uncached-rate cost allowance compared with all model usage. |
 
-Average the first five criteria across all episodes to get `O`, out of 90.
-For positive solver **grading cost** `S` and fixed benchmark **grading cost** `B`:
+Average the first five criteria across all episodes to get `O /90`. With positive
+solver grading cost `S` and the fixed allowance `B`:
 
 ```text
 score = min(100, O + 10 * min(1, B / S))
 ```
 
-A valid zero-API solution receives the full 10 efficiency points. Every model
-request counts, including specialists and repeated attempts. Local numerical
-search is free.
+A valid zero-API solver earns all ten efficiency points. Every model call counts,
+including specialist and repair calls. Local numerical computation is free.
+For an official grade, `S` includes the recorded model cost of every evaluated
+case. Earlier Dev, local Public and case-authoring experiments are separate and
+are not added to `S`. Calls that initialize or refresh memory during an evaluated
+case still count. There is no student-supplied API-cost baseline for a case package.
+Responses grading cost is `(all input tokens * uncached input price + output
+tokens * output price) / 1,000,000`. Decisions grading cost is
+`all input tokens * 0.10 / 1,000,000`, with no separate output fee. The ordinary
+input rate includes cached input for grading. The separate API estimate retains
+applicable cache discounts; it is an estimate, not an invoice.
 
-For grading, count **all input tokens, including cached tokens**, at the model's
-published uncached-input rate. For Responses, also count output tokens at its
-output rate. Decisions counts input only, with no separate output fee. Sum this
-amount across every request on both endpoints. The same calculation applies to the solver and
-recorded benchmark. This keeps cache hits from changing a score when two runs
-use the same tokens.
-
-```text
-Responses grading cost =
-    (all input tokens × uncached-input price per million
-     + output tokens × output price per million) / 1,000,000
-Decisions grading cost = all input tokens × 0.10 / 1,000,000
-```
-
-| Evaluation | Fixed grading-cost reference B | Recorded API cost estimate |
+| Evaluation | Episodes | Fixed grading allowance B |
 |---|---:|---:|
-| Public: 48 episodes | USD 0.01917000 | USD 0.00827514 |
-| Final Public + Hidden: 96 episodes | USD 0.03851960 | USD 0.01655132 |
+| Local Public development: 30 cases twice | 60 | USD 0.02407475 |
+| Official: 30 Public + 30 team-contributed + 60 Hidden cases once | 120 | USD 0.04814950 |
 
-The fixed allowances above carry over from the preserved v8 benchmark. Its
-recorded API amounts are historical measurements, not new measurements of the current bank.
-Current case registration and the historical measurement are labeled separately.
+Both allowances use the same cost reference per episode. They are fixed grading
+references, not spending limits.
+For example, `O=80` and `S=2B` earn 85/100; cost at or below B earns all ten
+efficiency points. Changing case content does not automatically change B.
 
-The grading cost is a common comparison measure, not an actual invoice. Reports
-also retain cached-token usage and the API cost estimate, including applicable
-cache-read/write rates for Responses.
-That separate estimate shows the cost of the observed run but does not determine
-the efficiency score. See [`framework/settings.py`](framework/settings.py) for
-the accounting rates and [`framework/fp_baseline.py`](framework/fp_baseline.py)
-for recorded aggregate metadata. The benchmark does not run again during your
-evaluation.
+The official set stays at 120 cases. Each team's accepted five cases replace its
+assigned contribution slots; they do not add cases to the total or replace the
+fixed Public examples. Team contributions and independent Hidden cases are
+managed separately. All cases receive equal outcome weight.
 
-For example, outcome `O=80` and grading cost `S=2B` earn `80+5=85/100`. Grading
-cost at or below B earns all 10 efficiency points. Reducing prompt length or
-unnecessary calls can reduce both cost measures; receiving a cache discount
-reduces only the API cost estimate.
-
-All three difficulty levels use this same rubric and have equal outcome weight.
-The leaderboard displays each level's contribution to the total:
+All levels have equal outcome weight:
 
 ```text
 Basic /30    = mean Basic outcome /90 divided by 3
@@ -568,97 +351,54 @@ Forecast /30 = mean Forecast outcome /90 divided by 3
 Total /100   = Basic + Reactive + Forecast + API efficiency /10
 ```
 
-The detailed report also shows each level's outcome /90 and complete-success
-count. API efficiency is calculated once over the whole scored bank; it is not
-added separately to each difficulty. Criterion scores are another breakdown of
-the same total, not additional points. The four request subcriteria divide the
-20 request points; they do not add another 20. Arrival means a usable itinerary,
-so an access/carrier violation can lose arrival credit and its request subcriterion.
-This overlap is part of the published contract.
+Criterion and difficulty columns are two views of the same score, not extra
+points. Access/carrier violations can lose both usable-arrival and the relevant
+request credit. Within-budget fares receive the same spending credit. A final
+suitable booking does not erase an unsafe action or missed first-booking deadline.
+Waiting for alternatives to expire does not erase a feasible mode opportunity.
+Scores display two decimals but are stored without that rounding.
 
-Scores are displayed to two decimal places and stored without that rounding.
-The score scale does not make the sample more statistically precise. The current
-scoring version is `travel-score-2026f-v3-100`; compare scores from the same bank
-and scoring version. Recorded benchmark tables explicitly identify recalculated
-scores from preserved observations; recalculation is not a new model run.
-
-Within-budget travel spending earns the same budget point even when two valid
-plans cost different amounts; travel dollars remain visible separately. Mode
-preference considers feasible opportunities when the active booking was chosen
-or at handoff. Waiting until alternatives expire does not erase an opportunity
-that could have satisfied the preference.
-
-No points require a particular agent count, fare label, memory class or forecast
-prediction. Strong single-agent and legitimate symbolic policies are allowed.
-The score measures observed outcomes and cost, not understanding or authorship.
-Two repeats are a small consistency check; the authored hidden bank is not a
-statistically independent sample. Hidden cases vary wording, amounts and
-combinations within the published contract and introduce no hidden criterion.
+The scoring version is `travel-score-2026f-v3-100`. Evaluation uses case state,
+actions and recorded API cost; an LLM does not grade your answer. No points
+require a particular agent count, model, fare label or memory class.
 
 ## 8. Package and submit
 
-```bash
-python submit.py --output submissions/team_solution.zip
-```
+Email **two ZIPs** to the existing course submission address at every leaderboard
+or final submission:
 
-The ZIP contains only:
+1. Run `python submit.py --output submissions/team_solution.zip`. This contains
+   `solution/config.py`, `solution/prompts.py`, `solution/policy.py` and the
+   generated source manifest.
+2. Build your five-case ZIP using [CASE_GUIDE.md](CASE_GUIDE.md). Include it even
+   if the cases are unchanged. This contains data, replay witnesses and a manifest,
+   not additional solver code.
 
-```text
-solution/config.py
-solution/prompts.py
-solution/policy.py
-SUBMISSION_MANIFEST.json
-```
+Cases are submitted continuously through **December 7, 2026 (KST), inclusive**.
+From December 8, attach the same accepted case content with new solver versions.
+Witness traces may be regenerated without changing that case content. The final
+solver is due **December 21**, with the exact time announced separately.
+No notebook, API key, separate report or AI-use disclosure is required. AI coders
+may help with all implementation, experiments, prompts and analysis.
 
-The manifest is automatic. Submit that ZIP by **December 21, 2026 (KST)**
-through the announced channel. The exact deadline time will be announced separately. No
-notebook, key, framework, generated run, separate report or AI-use disclosure is
-required. AI coders may help with implementation, prompts, experiments and analysis.
+## 9. Leaderboard and presentations
 
-Final grading reruns your three frozen solution files on all
-**96 public-plus-hidden episodes**. Saved local scores do not replace that
-evaluation. No best repeat or best bank is selected.
+Official evaluation includes 30 fixed Public cases, 30 team-contributed cases
+and 60 independent Hidden cases. Each team knows its own five contributions;
+the other teams' contributions and the independent Hidden cases are not released.
+Unreleased cases stay within the [published benchmark scope](BENCHMARK.md).
+The case-content cutoff is December 7. A later common selection may change
+examples within that scope, without introducing new capabilities.
 
-## 9. Leaderboard and help
+Every leaderboard comparison accounts for all cases and their API costs on the
+same evaluation set. Local runs always start fresh and are for development only.
 
-**Final presentations: online via Zoom for every team.** Follow the course
-schedule for your presentation date and session; the Zoom link and joining
-instructions will be announced separately. December 21 is the source-submission
-deadline, not an announcement of the presentation date.
+The spreadsheet link will be added later. It displays total, criterion scores,
+Basic /30, Reactive /30, Forecast /30, API efficiency, success and costs.
+Until December 13, each team may request grading once per Korean calendar day.
+December 14–19 has no daily limit; interim grading closes from December 20.
+The final source deadline remains December 21. Final grades use the final frozen
+source, not leaderboard rank or a team's highest previous score.
 
-Staff will publish interim results in a shared Google spreadsheet so teams can
-see their own and other teams' scores. The leaderboard will be created later,
-and its link will be added here. It will include total /100, each weighted
-criterion (including the four request subcriteria), Basic /30, Reactive /30,
-Forecast /30, shared API efficiency /10, complete success, grading cost and the
-separate API cost estimate. Detailed difficulty outcomes /90 remain available
-in the report. Every official staff entry, including interim leaderboard
-grading, uses 24 Public plus 24 Hidden cases twice each: 96 episodes. Your local
-Public score is a development result and does not replace that evaluation.
-
-**Final project submission is due December 21, 2026 (KST).** The exact deadline
-time and submission channel will be announced separately. The following limits
-apply to interim leaderboard grading requests, using Korean calendar dates
-(Asia/Seoul):
-
-| Dates in 2026 | Allowed requests per team |
-|---|---|
-| Through December 13 | One per calendar day. |
-| December 14–19, inclusive | No daily limit. |
-| From December 20 | Leaderboard grading requests are closed. |
-
-Closing interim feedback on December 20 does not move the final submission
-deadline: submit the source ZIP by December 21. The spreadsheet link will be added
-here after the leaderboard is created. Final grades use the frozen submission's
-task results and grading cost, not leaderboard rank or the best past leaderboard
-score.
-
-| Symptom | Next step |
-|---|---|
-| `No module named framework` in your own interactive session | Run from `project/`, or use the supplied `run.py` rather than executing solution files directly. |
-| Key placeholder/authentication error | Edit `project/.env`; check whether an environment variable overrides it. Never send the key in a report. |
-| Output directory already exists | Choose another name such as `runs/dev_02`. |
-| Protected-file review message | Restore the shared file from the distributed release; put your design in the three allowed solution files. |
-| Correct JSON but low score | Inspect current constraints and final state; schema validity does not imply a correct booking. |
-| Initial service/handoff failure | Inspect virtual tool time, deadlines, offer windows and confirmation status. |
-
+**All final presentations are online via Zoom.** The course presentation schedule
+is separate from the source deadline. Joining details will be announced later.

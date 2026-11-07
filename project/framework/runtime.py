@@ -18,7 +18,9 @@ EDITABLE_FILES = ("solution/config.py", "solution/prompts.py", "solution/policy.
 
 
 class ObservedWorld:
-    def __init__(self, world): self.__world = world
+    def __init__(self, world):
+        self.__world = world
+        self._actions = []
     @property
     def case_id(self): return self.__world.case_id
     @property
@@ -28,8 +30,12 @@ class ObservedWorld:
     @property
     def finished(self): return self.__world.finished
     def observe(self): return self.__world.observe()
-    def call(self, tool, **arguments): return self.__world.call(tool, **arguments)
-    def batch(self, actions): return self.__world.batch(actions)
+    def call(self, tool, **arguments):
+        self._actions.append(dict(tool=tool, arguments=copy.deepcopy(arguments)))
+        return self.__world.call(tool, **arguments)
+    def batch(self, actions):
+        self._actions.append(dict(batch=copy.deepcopy(actions)))
+        return self.__world.batch(actions)
 
 
 class ModelAPI:
@@ -89,7 +95,12 @@ def load_solution(path):
                 raise ValueError("solution/policy.py must define solve and route.")
             def solver(world, api, cfg, route):
                 gateway = ModelAPI(api, world.case_id) if api is not None else None
-                return policy.solve(ObservedWorld(world), gateway, cfg, route)
+                view = ObservedWorld(world)
+                try:
+                    return policy.solve(view, gateway, cfg, route)
+                finally:
+                    # Host diagnostic recording; no case definitions enter the policy.
+                    world._recorded_policy_actions = copy.deepcopy(view._actions)
             yield config, policy.route, solver, digest, sources
         finally:
             for key in list(sys.modules):
