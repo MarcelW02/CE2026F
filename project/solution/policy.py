@@ -5,7 +5,7 @@ all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from collections import defaultdict
-from framework.common import object_schema
+from framework.common import ResponseFailure, object_schema
 from framework.contract_interpreter import (BOOLEAN_VARIABLES, NUMBER_VARIABLES, STRING_VARIABLES,
                                             compile_contract, normalize_response)
 from framework.contract_policy import Controller
@@ -280,7 +280,13 @@ def decode_infix(source, clocks=None, *, fare_base=False):
             return tests[0] if len(tests) == 1 else dict(op="and", args=tests)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
             name = node.func.id
-            args = [parse(arg) for arg in node.args]
+            pool = None
+            if name in {"exists", "minimum"} and node.args:
+                token = ast.unparse(node.args[0]).removeprefix("state.")
+                if token in {"holds", "offers"}:
+                    pool = token
+            args = [pool if index == 0 and pool is not None else parse(arg)
+                    for index, arg in enumerate(node.args)]
             if fare_base and name == "base" and not args:
                 return {"base_retention": True}
             if name == "clock" and len(args) == 1 and isinstance(args[0], str) and args[0] in (clocks or {}):
@@ -386,14 +392,60 @@ def decode_booking_slot(field, draft, clocks, spending_text=""):
     return expression
 
 
-def compile_booking_slots(api, settings, evidence, drafts, clocks, label):
+def decision_rows_source(value):
+    if not isinstance(value, str) or " => " not in value:
+        return value
+    rows = [line.strip().split(" => ", 1) for line in value.splitlines() if line.strip()]
+    if not rows or any(len(row) != 2 or not all(row) for row in rows):
+        raise ValueError("A decision row needs a test and a result")
+    if rows[-1][0] != "otherwise" or any(row[0] == "otherwise" for row in rows[:-1]):
+        raise ValueError("A decision rule must end with a single ordinary result")
+    source = rows[-1][1]
+    for condition, result in reversed(rows[:-1]):
+        source = f"({result}) if ({condition}) else ({source})"
+    return source
+
+
+def numeric_envelope(expression):
+    """Prove value bounds without assuming which condition will activate."""
+    if type(expression) in (int, float):
+        return expression, expression
+    if not isinstance(expression, dict):
+        return None
+    op = expression.get("op")
+    if op == "if":
+        branches = [numeric_envelope(expression[key]) for key in ("then", "else")]
+        if all(bound is not None for bound in branches):
+            return min(bound[0] for bound in branches), max(bound[1] for bound in branches)
+    if op in {"min", "max"}:
+        bounds = [numeric_envelope(child) for child in expression["args"]]
+        if all(bound is not None for bound in bounds):
+            combine = min if op == "min" else max
+            return combine(bound[0] for bound in bounds), combine(bound[1] for bound in bounds)
+    return None
+
+
+def compile_booking_slots(api, settings, evidence, drafts, clocks, label, *, audit_collapse=False):
     sources = {field: doc["text"] for doc in evidence["authorities"] for field in doc["fields"]}
     spending = sources["budget_limit"]
     programs, rejected = {}, {}
+    amounts = {float(value.replace(",", "")) for value in re.findall(
+        r"(?:\bUSD\s+|\$)(\d+(?:,\d{3})*(?:\.\d+)?)", spending, re.IGNORECASE)}
+
+    def decode(field, draft):
+        result = decode_booking_slot(field, decision_rows_source(draft), clocks[field],
+                                     spending if field == "budget_limit" else "")
+        if audit_collapse:
+            values = amounts if field == "budget_limit" else set(clocks[field].values())
+            if len(values) > 1:
+                bounds = numeric_envelope(result)
+                if bounds and bounds[0] == bounds[1]:
+                    raise ValueError("Several written values remain but the draft always returns one; verify whether an exception was suppressed")
+        return result
+
     for field, draft in drafts.items():
         try:
-            programs[field] = decode_booking_slot(field, draft, clocks[field],
-                                                   spending if field == "budget_limit" else "")
+            programs[field] = decode(field, draft)
         except ValueError as error:
             rejected[field] = {"draft": draft, "diagnostic": str(error)}
     if not rejected:
@@ -401,6 +453,11 @@ def compile_booking_slots(api, settings, evidence, drafts, clocks, label):
     instructions = """Repair only the requested failed authorization fields from their authoritative text. Keep all applicable conditions and exceptions.
 Use Python expressions with numbers and conditional expressions. Budget is TOTAL authorized dollars and arrival is the client clock before transfer. Use clock("HH:MM") for observed clocks. In the offers pool the price is item.price and client arrival is item.meeting_arrival.
 Use exists("offers", predicate) to test whether a quote exists; minimum("offers", predicate, item.price, fallback) gives the lowest eligible price. The pool already includes the candidate's valid held quote. Use candidate.price for the proposed fare and put item only inside the pool predicate or value. Do not put a current quote's price or arrival in the program."""
+    if audit_collapse:
+        instructions += ("\nInclude each distinct applicable spending authorization. Do not cap an exception "
+                         "at the ordinary limit unless the source specifically requires that cap. "
+                         "Preserve conditional client clocks and fare or carrier scope even for future "
+                         "inventory that has not been searched yet.")
     schema = object_schema(dict.fromkeys(rejected, {"type": "string"}))
     reply = api.json(settings, instructions, {
         "authority": {field: sources[field] for field in rejected},
@@ -485,6 +542,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         use_literals = scoped or local_settings["model"] == "gpt-5-nano"
         limit = {"anyOf": [{"type": "number"}, string]} if use_literals else string
         props = dict(b=limit, a=limit, facts=facts)
+        decision_rows = not defer
         if use_literals:
             transfer = facts["properties"]["transfer"]
             facts["properties"]["transfer"] = {"anyOf": [{"type": "number"}, transfer]}
@@ -505,9 +563,30 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
                         waiver[key]["enum"] = sorted(values)
         if not defer:
             props["r"] = object_schema(dict.fromkeys(fares.values(), string))
+        if decision_rows:
+            instructions += """
+For b, a and each fare rule write a single expression if unconditional. For exceptions use one
+Python test => result row per line with the most specific applicable exception first. End with
+otherwise => ordinary result. Both the test and result are Python expressions. Include future conditions.
+Use clock("HH:MM") for explicit clocks. Use candidate.meeting_arrival directly for client-site arrival.
+Use booking.option_id for the purchased quote ID, item inside its pool, and quote the "offers" or "holds" pool.
+"""
         shape = object_schema(props)
         stage = "source_compiler" if scoped else "booking_only" if defer else "cited_infix"
-        raw = api.json(local_settings, instructions, packed, shape, dict(call_label, stage=stage))
+        primary = dict(local_settings, effort="none") if decision_rows else local_settings
+        try:
+            raw = api.json(primary, instructions, packed, shape, dict(call_label, stage=stage))
+        except ResponseFailure:
+            if not decision_rows:
+                raise
+            records = api.records
+            last = records[-1] if records else {}
+            details = (last.get("raw_response") or {}).get("incomplete_details") or {}
+            if (last.get("status") != "incomplete" or details.get("reason") != "max_output_tokens"
+                    or last.get("estimated_usd") is None):
+                raise
+            raw = api.json(local_settings, instructions, packed, shape,
+                           dict(call_label, stage=stage, attempt="accounted_token_limit"))
         if use_literals and type(raw["facts"]["transfer"]) in (int, float):
             raw["facts"]["transfer"] = dict.fromkeys(("flight", "train", "coach"), raw["facts"]["transfer"])
         if defer:
@@ -519,14 +598,15 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
                 fare_clocks = {match[0]: 60 * int(match[1]) + int(match[2]) for match in
                                re.finditer(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])", text)}
                 rules[index] = normalize_mode_comparisons(
-                    decode_infix(raw["r"][index], fare_clocks, fare_base=True))
+                    decode_infix(decision_rows_source(raw["r"][index]), fare_clocks, fare_base=True))
             fare_programs = [dict(id=ref[0], version=ref[1], retained=rules[index])
                              for ref, index in fares.items()]
             refund_groups = bind_fare_programs(offers, fare_programs)
-        if scoped:
+        if scoped or decision_rows:
+            evidence = packed if scoped else policy_evidence(referenced)
             slots = compile_booking_slots(
-                api, local_settings, packed, {"budget_limit": raw["b"], "arrival_deadline": raw["a"]},
-                {"budget_limit": policy_clocks, "arrival_deadline": clocks}, call_label)
+                api, local_settings, evidence, {"budget_limit": raw["b"], "arrival_deadline": raw["a"]},
+                {"budget_limit": policy_clocks, "arrival_deadline": clocks}, call_label, audit_collapse=decision_rows)
             budget, arrival = slots["budget_limit"], slots["arrival_deadline"]
         elif use_literals:
             ref = viewed["observation"]["operational_sources"]["budget_limit"]
