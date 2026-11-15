@@ -4,6 +4,9 @@ Keep additional policy functions/classes here. Model calls use api.json/api.deci
 all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
+from collections import defaultdict
+from framework.contract_interpreter import compile_contract, normalize_response
+from framework.contract_policy import Controller
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
 from copy import deepcopy
 import json
@@ -82,18 +85,95 @@ def route(observation, memory):
     return travel_route(observation, memory)
 
 
+class ForecastController(Controller):
+    def prepare(self, observation, booking):
+        """Evaluate compatible delays from the same announced report together."""
+        reports = defaultdict(dict)
+        conflicts = set()
+        for forecast in self.facts["forecasts"]:
+            at, delay = forecast.get("at"), forecast.get("delay")
+            if type(at) not in (int, float) or type(delay) not in (int, float) or at <= self.world.now:
+                continue
+            mode = forecast["mode"]
+            if mode in reports[at] and reports[at][mode] != delay:
+                conflicts.add(at)
+            reports[at][mode] = delay
+        joint_reports = {at: delays for at, delays in reports.items()
+                         if len(delays) > 1 and at not in conflicts}
+        if not joint_reports:
+            return super().prepare(observation, booking)
+
+        opportunities = []
+        for at, delays in joint_reports.items():
+            weather = {**self.facts["weather"], **delays}
+            if self.keep_valid(observation, booking, weather=weather, at=at):
+                continue
+            if any(hold["status"] == "held" and hold["expires_at"] > at + 4
+                   and (candidate := self.offers.get(hold["option_id"])) is not None
+                   and self.purchase_plan(observation, candidate, booking, weather=weather, at=at) is not None
+                   for hold in observation["holds"]):
+                continue
+            for offer in self.candidates(observation):
+                if offer["id"] == booking["option_id"] or not self.world.now + 1 < offer["expires_at"] <= at + 1:
+                    continue
+                fee = offer.get("hold_fee_usd", 0)
+                if fee:
+                    context = self.context(observation, offer, at=self.world.now + 1)
+                    limit = self.number(self.program["budget_limit"], context)
+                    if limit is None or observation["net_transport_spend_usd"] + observation["hotel_fee"] + fee > limit:
+                        continue
+
+                # Project the deposit and live reservation before evaluating recovery.
+                imagined = deepcopy(observation)
+                imagined["virtual_minute"] = at
+                imagined["net_transport_spend_usd"] += fee
+                imagined["uncredited_hold_deposits_usd"] += fee
+                imagined["holds"].append(dict(offer, id="anticipated-hold", option_id=offer["id"],
+                    held_at=self.world.now + 1, expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
+                plan = self.purchase_plan(imagined, offer, booking, weather=weather, at=at)
+                if plan is not None:
+                    opportunities.append((not plan["preferred"], fee, plan["expense"], offer["expires_at"], offer["id"]))
+        if not opportunities:
+            return super().prepare(observation, booking)
+        _, _, _, expires_at, offer_id = min(opportunities)
+        latest_start = expires_at - 2
+        if self.world.now < latest_start:
+            return latest_start
+        result = self.call("hold", id=offer_id)
+        self.trace.append(dict(kind="preparation", strategy="joint operating report",
+                               option_id=offer_id, result=deepcopy(result)))
+        return self.world.now if result.get("ok") else None
+
+
 def solve(world, api, config, route_fn):
-    """Retain the supplied agent, or implement your own observed-information loop.
+    if config["architecture"] != "hybrid_single" or not world.observe().get("operational_sources"):
+        return supplied_agent(world, api, config, route_fn)
 
-    The delegate already owns episode-local document, trip-state, routing and
-    search caches. Replace this body for a custom memory format or update policy;
-    keep helper functions/classes in this file and initialize memory inside solve.
-    Return serializable traces, working_memory and context for inspection. Memory
-    content is not a separate scoring criterion; actual outcomes are evaluated.
-    """
-    if config["architecture"] == "hybrid_single" and world.observe().get("operational_sources"):
-        def interpret(settings, instructions, payload, schema, label):
-            return interpret_with_consent_references(api, settings, instructions, payload, schema, label)
+    traces = []
 
-        return supplied_agent(world, SimpleNamespace(json=interpret), config, route_fn)
-    return supplied_agent(world, api, config, route_fn)
+    def interpret(settings, instructions, payload, schema, label):
+        response = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
+        try:
+            normalize_response(response, payload["offers"])
+        except ValueError as error:
+            instructions += (
+                f"\nThe previous compilation failed contract validation: {error}. "
+                "Recompile from the observed sources and check the complete response against the schema."
+            )
+            return interpret_with_consent_references(
+                api, settings, instructions, payload, schema, dict(label, attempt="validation_retry"),
+            )
+        return response
+
+    gateway = SimpleNamespace(json=interpret)
+    controller = ForecastController(
+        world, lambda payload: compile_contract(payload, gateway, config, (), traces), traces,
+        refresh_context=config["refresh_context"], max_decisions=config["max_decisions"],
+        prepare=config.get("forecast_strategy", "precaution") != "cheapest",
+    )
+    controller.run()
+    return dict(traces=traces, working_memory=dict(documents=controller.documents,
+        compiled=controller.program, purchased_refund_terms=controller.booked_programs,
+        purchased_refund_evidence=controller.booked_evidence),
+        context=dict(architecture=config["architecture"],
+                     source_versions={name: source["version"] for name, source in controller.documents.items()}))

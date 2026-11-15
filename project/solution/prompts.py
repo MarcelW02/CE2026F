@@ -3,6 +3,9 @@ from framework.fp_agents import FP_EXTRACTION_ROLE_PROMPTS
 from copy import deepcopy
 
 PROJECT_PROMPT = """Interpret the current lead outbound using the supplied evidence.
+Return the stated client-site arrival deadline itself, in clock minutes.
+The planner already adds mode-specific transfer time to terminal arrival.
+Do not subtract a transfer from that deadline or return a terminal cutoff.
 For consent, copy just the literal approval token from the applicable request.
 Exclude surrounding prose, punctuation, and the word "approval" itself.
 Preserve the current token when a partial update does not replace it.
