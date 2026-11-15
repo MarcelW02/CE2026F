@@ -307,6 +307,42 @@ def client_deadline_value(expression):
     return expression
 
 
+def written_ceiling_values(payload):
+    ref = payload["observation"]["operational_sources"]["budget_limit"]
+    text = next((doc["text"] for doc in payload["documents"]
+                 if doc["id"] == ref["id"] and doc["version"] == ref["version"]), "")
+    return {float(value.replace(",", "")) for value in
+            re.findall(r"(?:\bUSD\s+|\$)(\d+(?:,\d{3})*(?:\.\d+)?)", text, re.IGNORECASE)}
+
+
+def simple_literal_authorities(payload):
+    if not len(written_ceiling_values(payload)) == len(set(observed_clocks(payload).values())) == 1:
+        return False
+    refs = {(ref["id"], ref["version"]) for ref in payload["observation"]["operational_sources"].values()}
+    authority = "\n".join(doc["text"] for doc in payload["documents"]
+                          if (doc["id"], doc["version"]) in refs)
+    quote_values = {offer[key] for offer in payload["offers"] for key in ("carrier", "mode")}
+    return not any(re.search(r"(?<![\w-])" + re.escape(value) + r"(?![\w-])", authority, re.IGNORECASE)
+                   for value in quote_values if value)
+
+
+def decode_grounded_limit(value, clocks, spending_text=""):
+    if type(value) in (int, float):
+        return value
+    value = value.strip()
+    if value in clocks:
+        return clocks[value]
+    money = r"(?:\bUSD\s+|\$)(\d+(?:,\d{3})*(?:\.\d+)?)"
+    if spending_text and (match := re.fullmatch(money, value, re.IGNORECASE)):
+        amount = float(match[1].replace(",", ""))
+        observed = {float(written.replace(",", ""))
+                    for written in re.findall(money, spending_text, re.IGNORECASE)}
+        if amount not in observed:
+            raise ValueError("Currency literal is absent from the operative authority")
+        return amount
+    return decode_infix(value, clocks)
+
+
 def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=False):
     def request(local_settings, instructions, viewed, full, call_label):
         clocks = observed_clocks(viewed)
@@ -316,11 +352,22 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
                                      for offer in viewed["offers"]])
         referenced, _, aliases = offer_references(visible, full)
         packed = pack_observed_packet(referenced)
+        isolate = defer and local_settings["model"] == "gpt-5-nano"
+        if isolate:
+            text = "\n".join(doc["text"] for doc in referenced["documents"])
+            text += "\n" + "\n".join(notice["text"] for notice in referenced["observation"]["notices"])
+            if not any(offer["id"] in text for offer in referenced["offers"]):
+                packed.pop("offers")
+                packed["runtime_offer_fields"] = sorted({key for quote in referenced["offers"] for key in quote})
+                instructions += ("\nActual quotes are evaluated later by Python. Infer rules only from "
+                                 "the linked authority, never from a ticket price or arrival. The "
+                                 "runtime supplies candidate and live offers for conditional calculations.")
         documents = pack_initial_documents(packed["documents"])
         packed = dict(packed, documents=documents)
         if isinstance(documents, dict):
             instructions += "\nDocuments keyed by ID: [version, title, full text, ...links]."
-        instructions += "\nFor tabular offers, each row inherits shared fields, then the ordered columns. "
+        if "offers" in packed:
+            instructions += "\nFor tabular offers, each row inherits shared fields, then the ordered columns. "
         if not defer:
             instructions += "Refund assignment keys are zero-based offer row indices. "
         if policy_clocks:
@@ -334,7 +381,27 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         if approvals:
             facts["properties"]["consent"]["enum"] = [*approvals, ""]
         string = {"type": "string"}
-        props = dict(b=string, a=string, facts=facts)
+        use_literals = local_settings["model"] == "gpt-5-nano"
+        limit = {"anyOf": [{"type": "number"}, string]} if use_literals else string
+        props = dict(b=limit, a=limit, facts=facts)
+        if use_literals:
+            transfer = facts["properties"]["transfer"]
+            facts["properties"]["transfer"] = {"anyOf": [{"type": "number"}, transfer]}
+            instructions += ("\nRead the transport guide for transfers. If all modes take the same "
+                             "transfer time, output that single number in facts.transfer. Use a "
+                             "complete mode map for distinct times. Apply the guide to every mode, "
+                             "including modes without current offers.")
+            instructions += ("\nFor a simple ceiling give a number in b. For a stated client clock "
+                             "give its exact HH:MM string in a. For a conditional or derived rule "
+                             "return a Python expression. b is total authorized dollars, not a test.")
+            bulletin = next((doc for doc in viewed["documents"] if doc["id"] == "hotel-bulletin"), None)
+            if bulletin:
+                waiver = facts["properties"]["waiver"]["properties"]
+                proof = set(re.findall(r"\bproof-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b", bulletin["text"]))
+                topic = set(re.findall(r"\b[A-Za-z]+(?:[-_][A-Za-z0-9]+)+\b", bulletin["text"])) - proof
+                for key, values in (("topic", topic), ("code", proof)):
+                    if len(values) == 1:
+                        waiver[key]["enum"] = sorted(values)
         if not defer:
             props.update(rules=dict(type="array", minItems=1, items=string),
                          r=object_schema({str(i): dict(type="integer", minimum=0, maximum=len(offers)-1)
@@ -342,6 +409,8 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         shape = object_schema(props)
         stage = "booking_only" if defer else "cited_infix"
         raw = api.json(local_settings, instructions, packed, shape, dict(call_label, stage=stage))
+        if use_literals and type(raw["facts"]["transfer"]) in (int, float):
+            raw["facts"]["transfer"] = dict.fromkeys(("flight", "train", "coach"), raw["facts"]["transfer"])
         if defer:
             refund_groups = [dict(offer_ids=[offer["id"] for offer in offers], retained=None)]
         else:
@@ -353,8 +422,18 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
                 grouped[group].append(offer["id"])
             refund_groups = [dict(offer_ids=ids, retained=decode_infix(raw["rules"][index]))
                              for index, ids in grouped.items()]
-        response = dict(budget_limit=decode_infix(raw["b"], policy_clocks),
-                        arrival_deadline=client_deadline_value(decode_infix(raw["a"], clocks)),
+        if use_literals:
+            ref = viewed["observation"]["operational_sources"]["budget_limit"]
+            spending = next((doc["text"] for doc in viewed["documents"]
+                             if doc["id"] == ref["id"] and doc["version"] == ref["version"]), "")
+            if isinstance(raw["b"], str) and raw["b"].strip() in policy_clocks:
+                raise ValueError("A budget is expressed in dollars")
+            budget = decode_grounded_limit(raw["b"], policy_clocks, spending)
+            arrival = decode_grounded_limit(raw["a"], clocks)
+        else:
+            budget = decode_infix(raw["b"], policy_clocks)
+            arrival = decode_infix(raw["a"], clocks)
+        response = dict(budget_limit=budget, arrival_deadline=client_deadline_value(arrival),
                         refund_groups=refund_groups, facts=raw["facts"])
         return restore_offer_references(response, aliases) if aliases else response
 
@@ -371,6 +450,12 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
     response = interpret_with_consent_references(
         SimpleNamespace(json=request), settings, instructions, viewed, base_schema, label)
     facts = response["facts"]
+    if defer and settings["model"] == "gpt-5-nano":
+        sources = "\n".join(doc["text"] for doc in viewed["documents"])
+        sources += "\n" + "\n".join(n["text"] for n in viewed["observation"]["notices"])
+        if any(not carrier or not re.search(r"(?<![\w-])" + re.escape(carrier) + r"(?![\w-])", sources,
+                                           re.IGNORECASE) for carrier in facts["avoid_carriers"]):
+            raise ValueError("Carrier exclusion lacks observed text")
     facts["forecasts"] = [value for value in facts["forecasts"]
                          if value["at"] is not None or value["probability"] is not None or value["delay"] not in (0, None)]
     bulletin = next((doc for doc in payload["documents"] if doc["id"] == "hotel-bulletin"), None)
@@ -386,6 +471,28 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
     if collapses_observed_budget(response, payload):
         raise ValueError("Check distinct amounts before choosing a constant ceiling")
     return response
+
+
+def review_unanchored_transfer(api, settings, payload, compiled, label):
+    guide = next((doc for doc in payload["documents"] if doc["id"] == "transport-guide"), None)
+    if guide is None:
+        return compiled
+    claimed = compiled["facts"]["transfer"]
+    known = {int(value) for value in re.findall(r"\b(\d+)\s+minutes?\b", guide["text"])}
+    if not known or set(claimed.values()) <= known:
+        return compiled
+    modes = ("flight", "train", "coach")
+    shape = object_schema(dict.fromkeys(modes, {"type": "number"}))
+    instructions = ("Read the current guide and return terminal-to-client transfer minutes for all modes. "
+                    "Apply the same number to each mode when the guide gives a shared transfer. Keep "
+                    "separate durations only when differentiated by the observed guide or request. "
+                    "No transfer is zero. Neither quote arrival times nor travel duration are transfers.")
+    answer = api.json(settings, instructions,
+                      dict(guide=guide["text"], notices=payload["observation"]["notices"], draft=claimed),
+                      shape, dict(label, stage="transfer_review"))
+    revised = dict(compiled, facts=dict(compiled["facts"], transfer=answer))
+    normalize_response(revised, payload["offers"])
+    return revised
 
 
 def uses_ledger_in_ceiling(expression):
@@ -405,7 +512,7 @@ def uses_ledger_in_ceiling(expression):
     return any(uses_ledger_in_ceiling(child) for child in expression.values())
 
 
-def review_planning_rules(api, settings, payload, response, controller, label):
+def review_planning_rules(api, settings, payload, response, controller, label, *, verify_literals=False):
     """Audit draft feasibility without advancing simulator time, then review selected slots."""
     observation = deepcopy(payload["observation"])
     if observation["hotel_fee"]:
@@ -419,8 +526,12 @@ def review_planning_rules(api, settings, payload, response, controller, label):
         controller.program = original
     budgets_need_review = uses_ledger_in_ceiling(response["budget_limit"])
     clocks = observed_clocks(payload)
-    deadlines_need_review = False
     deadline = response["arrival_deadline"]
+    deadlines_need_review = False
+    if verify_literals:
+        budget = response["budget_limit"]
+        budgets_need_review |= type(budget) in (int, float) and budget not in written_ceiling_values(payload)
+        deadlines_need_review = type(deadline) in (int, float) and deadline not in clocks.values()
     if type(deadline) in (int, float) and deadline not in clocks.values() and any(
             clock - transfer == deadline for clock in clocks.values() for transfer in response["facts"]["transfer"].values()):
         deadlines_need_review = True
@@ -827,18 +938,33 @@ def program_definitions():
     return definitions
 
 
+def apply_base_retention(expression, base):
+    if isinstance(expression, list):
+        return [apply_base_retention(value, base) for value in expression]
+    if not isinstance(expression, dict):
+        return expression
+    if expression == {"base_retention": True}:
+        return base
+    return {name: apply_base_retention(value, base) for name, value in expression.items()}
+
+
 def compile_purchased_refund(api, settings, ticket, source, *, stage="purchased_fare"):
-    evidence = dict(ticket=ticket, purchase_source=dict(version=source["version"], text=source["text"]))
+    public_quote = {key: value for key, value in ticket.items()
+                    if key not in {"cancel_fee_usd", "fare_fields_scope"}}
+    evidence = dict(ticket=public_quote, purchase_source=dict(version=source["version"], text=source["text"]))
     shape = object_schema({"retained": {"$ref": "#/$defs/expression"}})
-    shape["$defs"] = {"expression": program_definitions()["expression"]}
-    instructions = """Compile the retained dollars on cancellation of the observed ticket.
-Use its most specific clause in the linked purchase source. Base fields cover only gaps.
-Full refund retains 0. Forbidden cancellation retains null. Partial refund keeps only the unreturned money.
-Apply qualifications on the original ticket from that ticket's mode, carrier and original ID. The model does not need to repeat a qualification you can resolve from the given quote.
-Use the schema expressions, with if/when/then/else, and {"var":"state.now"} for cancellation completion time.
-For a qualifying live replacement use op exists, pool holds, and a predicate over item, independent of the old ticket. Keep exactly the required qualities of that hold. The hold is already live. For example {"var":"item.meeting_arrival"} is a clock minute, comparable directly to an HH:MM converted as 60*HH+MM. state.weather.MODE is the actual operating delay."""
+    definition = program_definitions()["expression"]
+    definition["anyOf"].append(object_schema({"base_retention": {"type": "boolean", "enum": [True]}}))
+    shape["$defs"] = {"expression": definition}
+    instructions = """Compile the purchase authority's rule for money RETAINED on cancellation of this quote.
+A clause that returns every payment leaves 0 retained. A prohibition leaves null. A partial refund keeps the unreturned money.
+Use the linked fare text as authority, including its explicit default. Use {"base_retention":true} only on a branch where the source delegates to ordinary terms or leaves the case uncovered. The planner will fill in that value. Read all clauses before choosing the most specific one for this quote's ID, mode or carrier.
+Use the schema expressions; keep if conditions and their correct then/else amounts. state.now is the cancellation completion minute. state.weather.MODE is the actual delay.
+For qualifying replacement holds use an exists expression over the live holds pool. item denotes the held replacement and does not inherit this purchased quote's carrier or mode. item.meeting_arrival includes transfer."""
     reply = api.json(settings, instructions, evidence, shape, dict(role="frozen_refund", stage=stage))
-    expression = reply["retained"]
+    policy = ticket.get("change_policy", "flexible")
+    base = {"fee": ticket.get("cancel_fee_usd", 0), "flexible": 0, "locked": None}[policy]
+    expression = apply_base_retention(reply["retained"], base)
     validate_expression(expression, result_kind="refund")
     return expression
 
@@ -1020,8 +1146,13 @@ def solve(world, api, config, route_fn):
         if response is None and payload["previous"] is None:
             try:
                 defer_fares = not any(doc["id"] == "weather-forecast" for doc in payload["documents"])
-                response = cited_infix_initial(api, settings, payload, schema, label, defer=defer_fares)
-                response = review_planning_rules(api, settings, payload, response, controller, label)
+                use_nano = defer_fares and simple_literal_authorities(payload)
+                first_settings = dict(settings, model="gpt-5-nano", effort="minimal") if use_nano else settings
+                response = cited_infix_initial(api, first_settings, payload, schema, label, defer=defer_fares)
+                if use_nano:
+                    response = review_unanchored_transfer(api, settings, payload, response, label)
+                response = review_planning_rules(api, settings, payload, response, controller, label,
+                                                 verify_literals=use_nano)
                 controller.defer_fares = defer_fares
             except ValueError:
                 try:
