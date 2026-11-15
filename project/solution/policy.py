@@ -6,7 +6,8 @@ read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from collections import defaultdict
 from framework.common import object_schema
-from framework.contract_interpreter import compile_contract, normalize_response
+from framework.contract_interpreter import (BOOLEAN_VARIABLES, NUMBER_VARIABLES, STRING_VARIABLES,
+                                            compile_contract, normalize_response)
 from framework.contract_policy import Controller
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
 from copy import deepcopy
@@ -84,6 +85,44 @@ def route(observation, memory):
     parsed trip state. Return domain names; edits to this argument do not persist.
     """
     return travel_route(observation, memory)
+
+
+def compact_initial(api, settings, instructions, payload, schema, label):
+    """Share a strict expression grammar across contract output fields."""
+    def request(local_settings, text, viewed, full, request_label):
+        shape = deepcopy(full)
+        props = shape["properties"]
+        expr = {"$ref": "#/$defs/expression"}
+        variables = sorted(set(NUMBER_VARIABLES + BOOLEAN_VARIABLES + STRING_VARIABLES))
+        enum = lambda names: {"type": "string", "enum": list(names)}
+        nodes = [
+            {"type": "number"}, {"type": "boolean"}, {"type": "string"}, {"type": "null"},
+            object_schema({"var": enum(variables)}),
+            object_schema({"op": enum(("if",)), "when": expr, "then": expr, "else": expr}),
+            object_schema({"op": enum(("not",)), "arg": expr}),
+            object_schema({"op": enum(("and", "or", "add", "sub", "min", "max")),
+                           "args": {"type": "array", "items": expr, "minItems": 1}}),
+            object_schema({"op": enum(("eq", "ne", "lt", "le", "gt", "ge", "in")),
+                           "left": expr, "right": expr}),
+            object_schema({"op": enum(("exists",)), "pool": enum(("offers", "holds")), "where": expr}),
+            object_schema({"op": enum(("minimum",)), "pool": enum(("offers", "holds")),
+                           "where": expr, "value": expr, "default": {"type": "number"}}),
+            {"type": "array", "items": expr},
+        ]
+        shape["$defs"] = {"expression": {"anyOf": nodes}}
+        props["budget_limit"] = expr
+        props["arrival_deadline"] = expr
+        props["refund_groups"]["items"]["properties"]["retained"] = expr
+        visible = dict(viewed, offers=[{key: value for key, value in offer.items()
+                                      if key not in {"observed_at", "fare_fields_scope"}}
+                                     for offer in viewed["offers"]])
+        return api.json(local_settings, text, visible, shape, dict(request_label, stage="shared_expression"))
+
+    response = interpret_with_consent_references(
+        SimpleNamespace(json=request), settings, instructions, payload, schema, label,
+    )
+    normalize_response(response, payload["offers"])
+    return response
 
 
 def interpret_amendment(api, settings, payload, previous_packet, schema, label):
@@ -360,6 +399,11 @@ def solve(world, api, config, route_fn):
         if response is None:
             response = interpret_amendment(api, settings, payload, previous_packet, schema, label)
         previous_packet = payload
+        if response is None and payload["previous"] is None:
+            try:
+                response = compact_initial(api, settings, instructions, payload, schema, label)
+            except ValueError:
+                response = None
         if response is None:
             response = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
         try:
