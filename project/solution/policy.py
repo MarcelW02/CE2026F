@@ -351,6 +351,69 @@ def decode_grounded_limit(value, clocks, spending_text=""):
     return decode_infix(value, clocks)
 
 
+def policy_evidence(packet):
+    """Join authoritative slots to observed documents before semantic compilation."""
+    observation = packet["observation"]
+    documents = {(doc["id"], doc["version"]): doc for doc in packet["documents"]}
+    if len(documents) != len(packet["documents"]):
+        raise ValueError("Ambiguous source version")
+    linked = defaultdict(list)
+    for field, ref in observation["operational_sources"].items():
+        linked[ref["id"], ref["version"]].append(field)
+    if not linked.keys() <= documents.keys():
+        raise ValueError("Missing operative authority")
+    authorities = [
+        dict(fields=linked[key], id=key[0], text=doc["text"], related=doc["related"])
+        for key, doc in documents.items() if key in linked
+    ]
+    supporting = pack_initial_documents([doc for key, doc in documents.items() if key not in linked])
+    texts = [doc["text"] for doc in documents.values()]
+    texts.extend(notice["text"] for notice in observation["notices"])
+    source_text = "\n".join(texts)
+    offer_ids = [offer["id"] for offer in packet["offers"]
+                 if re.search(r"(?<![\w-])" + re.escape(offer["id"]) + r"(?![\w-])", source_text)]
+    return dict(authorities=authorities, supporting=supporting,
+                notices=observation["notices"], observed_offer_ids=offer_ids)
+
+
+def decode_booking_slot(field, draft, clocks, spending_text=""):
+    if field == "budget_limit" and isinstance(draft, str) and draft.strip() in clocks:
+        raise ValueError("A budget is expressed in dollars")
+    expression = decode_grounded_limit(draft, clocks, spending_text)
+    if field == "arrival_deadline":
+        expression = client_deadline_value(expression)
+    validate_expression(expression, result_kind="number")
+    return expression
+
+
+def compile_booking_slots(api, settings, evidence, drafts, clocks, label):
+    sources = {field: doc["text"] for doc in evidence["authorities"] for field in doc["fields"]}
+    spending = sources["budget_limit"]
+    programs, rejected = {}, {}
+    for field, draft in drafts.items():
+        try:
+            programs[field] = decode_booking_slot(field, draft, clocks[field],
+                                                   spending if field == "budget_limit" else "")
+        except ValueError as error:
+            rejected[field] = {"draft": draft, "diagnostic": str(error)}
+    if not rejected:
+        return programs
+    instructions = """Repair only the requested failed authorization fields from their authoritative text. Keep all applicable conditions and exceptions.
+Use Python expressions with numbers and conditional expressions. Budget is TOTAL authorized dollars and arrival is the client clock before transfer. Use clock("HH:MM") for observed clocks. In the offers pool the price is item.price and client arrival is item.meeting_arrival.
+Use exists("offers", predicate) to test whether a quote exists; minimum("offers", predicate, item.price, fallback) gives the lowest eligible price. The pool already includes the candidate's valid held quote. Use candidate.price for the proposed fare and put item only inside the pool predicate or value. Do not put a current quote's price or arrival in the program."""
+    schema = object_schema(dict.fromkeys(rejected, {"type": "string"}))
+    reply = api.json(settings, instructions, {
+        "authority": {field: sources[field] for field in rejected},
+        "rejected": rejected,
+        "clocks": {field: list(clocks[field]) for field in rejected},
+        "quoted_offer_ids": evidence["observed_offer_ids"],
+    }, schema, dict(label, stage="initial_slot_review"))
+    for field in rejected:
+        programs[field] = decode_booking_slot(field, reply[field], clocks[field],
+                                              spending if field == "budget_limit" else "")
+    return programs
+
+
 def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=False):
     def request(local_settings, instructions, viewed, full, call_label):
         clocks = observed_clocks(viewed)
@@ -378,7 +441,8 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
             packed["fare_sources"] = {index: list(ref) for ref, index in fares.items()}
         else:
             packed = pack_observed_packet(referenced)
-        isolate = defer and local_settings["model"] == "gpt-5-nano"
+        scoped = defer and local_settings["model"] != "gpt-5-nano"
+        isolate = defer and not scoped
         if isolate:
             text = "\n".join(doc["text"] for doc in referenced["documents"])
             text += "\n" + "\n".join(notice["text"] for notice in referenced["observation"]["notices"])
@@ -392,6 +456,17 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         packed = dict(packed, documents=documents)
         if isinstance(documents, dict):
             instructions += "\nDocuments keyed by ID: [version, title, full text, ...links]."
+        if scoped:
+            packed = policy_evidence(referenced)
+            instructions += "\nSupporting document values are [version, title, full text, ...links] if keyed by ID."
+            instructions += ("\nThe authorities array joins each binding budget or arrival field to its currently "
+                             "linked source. Supporting documents remain available for profile, waiver, "
+                             "transfers, weather, and cross-references. Read all notices in order. "
+                             "Python will evaluate actual quotes later. Use candidate for the proposed ticket "
+                             "and item within an offers or holds quantifier. The runtime variable state.hotel_fee "
+                             "is the actual outstanding hotel charge. In quote predicates use item.price, "
+                             "item.step_free and item.meeting_arrival. Use exists() for eligible inventory; "
+                             "use minimum() for the cheapest eligible quote. Preserve each authorization condition.")
         if "offers" in packed:
             instructions += "\nFor tabular offers, each row inherits shared fields, then the ordered columns. "
         if not defer:
@@ -407,7 +482,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         if approvals:
             facts["properties"]["consent"]["enum"] = [*approvals, ""]
         string = {"type": "string"}
-        use_literals = local_settings["model"] == "gpt-5-nano"
+        use_literals = scoped or local_settings["model"] == "gpt-5-nano"
         limit = {"anyOf": [{"type": "number"}, string]} if use_literals else string
         props = dict(b=limit, a=limit, facts=facts)
         if use_literals:
@@ -431,7 +506,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         if not defer:
             props["r"] = object_schema(dict.fromkeys(fares.values(), string))
         shape = object_schema(props)
-        stage = "booking_only" if defer else "cited_infix"
+        stage = "source_compiler" if scoped else "booking_only" if defer else "cited_infix"
         raw = api.json(local_settings, instructions, packed, shape, dict(call_label, stage=stage))
         if use_literals and type(raw["facts"]["transfer"]) in (int, float):
             raw["facts"]["transfer"] = dict.fromkeys(("flight", "train", "coach"), raw["facts"]["transfer"])
@@ -448,7 +523,12 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
             fare_programs = [dict(id=ref[0], version=ref[1], retained=rules[index])
                              for ref, index in fares.items()]
             refund_groups = bind_fare_programs(offers, fare_programs)
-        if use_literals:
+        if scoped:
+            slots = compile_booking_slots(
+                api, local_settings, packed, {"budget_limit": raw["b"], "arrival_deadline": raw["a"]},
+                {"budget_limit": policy_clocks, "arrival_deadline": clocks}, call_label)
+            budget, arrival = slots["budget_limit"], slots["arrival_deadline"]
+        elif use_literals:
             ref = viewed["observation"]["operational_sources"]["budget_limit"]
             spending = next((doc["text"] for doc in viewed["documents"]
                              if doc["id"] == ref["id"] and doc["version"] == ref["version"]), "")
@@ -487,7 +567,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
     response = interpret_with_consent_references(
         SimpleNamespace(json=request), settings, instructions, viewed, base_schema, label)
     facts = response["facts"]
-    if defer and settings["model"] == "gpt-5-nano":
+    if defer:
         sources = "\n".join(doc["text"] for doc in viewed["documents"])
         sources += "\n" + "\n".join(n["text"] for n in viewed["observation"]["notices"])
         if any(not carrier or not re.search(r"(?<![\w-])" + re.escape(carrier) + r"(?![\w-])", sources,
@@ -1322,7 +1402,7 @@ def solve(world, api, config, route_fn):
                 use_nano = defer_fares and simple_literal_authorities(payload)
                 first_settings = dict(settings, model="gpt-5-nano", effort="minimal") if use_nano else settings
                 response = cited_infix_initial(api, first_settings, payload, schema, label, defer=defer_fares)
-                if use_nano:
+                if defer_fares:
                     response = review_unanchored_transfer(api, settings, payload, response, label)
                 response = review_planning_rules(api, settings, payload, response, controller, label,
                                                  verify_literals=use_nano)
