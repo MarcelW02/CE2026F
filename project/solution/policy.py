@@ -229,7 +229,7 @@ when there are no forecasts. Compile rules without selecting an offer.
 """
 
 
-def decode_infix(source, clocks=None):
+def decode_infix(source, clocks=None, *, fare_base=False):
     """Translate a bounded expression subset without executing Python."""
     if len(source) > 2400:
         raise ValueError("Expression exceeds the compiler limit")
@@ -281,6 +281,8 @@ def decode_infix(source, clocks=None):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.keywords:
             name = node.func.id
             args = [parse(arg) for arg in node.args]
+            if fare_base and name == "base" and not args:
+                return {"base_retention": True}
             if name == "clock" and len(args) == 1 and isinstance(args[0], str) and args[0] in (clocks or {}):
                 return clocks[args[0]]
             if name in {"min", "max"} and args:
@@ -357,7 +359,25 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
                                       if key not in {"observed_at", "fare_fields_scope"}}
                                      for offer in viewed["offers"]])
         referenced, _, aliases = offer_references(visible, full)
-        packed = pack_observed_packet(referenced)
+        fares = {}
+        if not defer:
+            for offer in referenced["offers"]:
+                ref = offer["refund_contract_source"]
+                fares.setdefault((ref["id"], ref["version"]), str(len(fares)))
+            documents_by_ref = {(doc["id"], doc["version"]): doc["text"]
+                                for doc in referenced["documents"]}
+            if not fares.keys() <= documents_by_ref.keys():
+                raise ValueError("An assigned fare authority has not been observed")
+            market = []
+            for offer in referenced["offers"]:
+                row = {key: offer[key] for key in ("id", "carrier", "mode", "step_free", "weather_exposed")}
+                ref = offer["refund_contract_source"]
+                row["fare_source"] = fares[ref["id"], ref["version"]]
+                market.append(row)
+            packed = pack_observed_packet(dict(referenced, offers=market))
+            packed["fare_sources"] = {index: list(ref) for ref, index in fares.items()}
+        else:
+            packed = pack_observed_packet(referenced)
         isolate = defer and local_settings["model"] == "gpt-5-nano"
         if isolate:
             text = "\n".join(doc["text"] for doc in referenced["documents"])
@@ -375,7 +395,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         if "offers" in packed:
             instructions += "\nFor tabular offers, each row inherits shared fields, then the ordered columns. "
         if not defer:
-            instructions += "Refund assignment keys are zero-based offer row indices. "
+            instructions += "Fare program keys refer to the fare_sources map. "
         if policy_clocks:
             instructions += "Use clock() only for these observed spending or client-arrival clocks: " + ", ".join(policy_clocks) + "."
         else:
@@ -409,9 +429,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
                     if len(values) == 1:
                         waiver[key]["enum"] = sorted(values)
         if not defer:
-            props.update(rules=dict(type="array", minItems=1, items=string),
-                         r=object_schema({str(i): dict(type="integer", minimum=0, maximum=len(offers)-1)
-                                          for i in range(len(offers))}))
+            props["r"] = object_schema(dict.fromkeys(fares.values(), string))
         shape = object_schema(props)
         stage = "booking_only" if defer else "cited_infix"
         raw = api.json(local_settings, instructions, packed, shape, dict(call_label, stage=stage))
@@ -420,14 +438,16 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         if defer:
             refund_groups = [dict(offer_ids=[offer["id"] for offer in offers], retained=None)]
         else:
-            grouped = defaultdict(list)
-            for i, offer in enumerate(offers):
-                group = raw["r"][str(i)]
-                if group >= len(raw["rules"]):
-                    raise ValueError("Missing refund expression")
-                grouped[group].append(offer["id"])
-            refund_groups = [dict(offer_ids=ids, retained=decode_infix(raw["rules"][index]))
-                             for index, ids in grouped.items()]
+            rules = {}
+            for ref, index in fares.items():
+                text = documents_by_ref[ref]
+                fare_clocks = {match[0]: 60 * int(match[1]) + int(match[2]) for match in
+                               re.finditer(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])", text)}
+                rules[index] = normalize_mode_comparisons(
+                    decode_infix(raw["r"][index], fare_clocks, fare_base=True))
+            fare_programs = [dict(id=ref[0], version=ref[1], retained=rules[index])
+                             for ref, index in fares.items()]
+            refund_groups = bind_fare_programs(offers, fare_programs)
         if use_literals:
             ref = viewed["observation"]["operational_sources"]["budget_limit"]
             spending = next((doc["text"] for doc in viewed["documents"]
@@ -441,13 +461,24 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
             arrival = decode_infix(raw["a"], clocks)
         response = dict(budget_limit=budget, arrival_deadline=client_deadline_value(arrival),
                         refund_groups=refund_groups, facts=raw["facts"])
+        if not defer:
+            response["fare_programs"] = fare_programs
         return restore_offer_references(response, aliases) if aliases else response
 
     instructions = INFIX_INSTRUCTIONS
     viewed = payload
+    start, end = instructions.index("Output rules as distinct"), instructions.index("Copy consent")
+    fare_instructions = (
+        "Return one executable retained-dollar rule in r for each current fare source. "
+        "Compile every clause, including quote classes absent from the current search. At cancellation booking describes "
+        "the actual purchased ticket. Match its most specific clause with booking.mode, "
+        "booking.carrier or booking.option_id. Mode values are flight, train, coach. "
+        "Use 0 for full refund, None if forbidden and base() for uncovered ordinary terms. "
+        "Keep time, actual delay and qualifying live replacement conditions. "
+        "Use item for a replacement hold, independent of the old ticket's mode and carrier.\n\n"
+    )
+    instructions = instructions[:start] + ("" if defer else fare_instructions) + instructions[end:]
     if defer:
-        start, end = instructions.index("Output rules as distinct"), instructions.index("Copy consent")
-        instructions = instructions[:start] + instructions[end:]
         authority_ids = {ref["id"] for ref in payload["observation"]["operational_sources"].values()}
         fare_ids = {offer["refund_contract_source"]["id"] for offer in payload["offers"]}
         linked = {identifier for doc in payload["documents"] for identifier in doc["related"]}
@@ -812,17 +843,27 @@ Use null for unchanged traveler facts. Consent is the literal booking/cancellati
     return result
 
 
-def weather_delta(api, settings, payload, previous_packet, schema, label, *, effort="none"):
+def weather_delta(api, settings, payload, previous_packet, schema, label, *, effort="none", defer_fares=False):
     """Reinterpret a weather-only update without rebuilding unchanged contracts."""
     previous = payload["previous"]
     if previous is None or previous_packet is None:
         return None
+    fare_programs = previous.get("fare_programs")
+    scoped_fares = defer_fares or fare_programs is not None
+    if fare_programs is not None:
+        # A matching current source is required before reusing its executable program.
+        observed = {(doc["id"], doc["version"]) for doc in payload["documents"]}
+        if any((program["id"], program["version"]) not in observed for program in fare_programs):
+            return None
     old_observation, observation = previous_packet["observation"], payload["observation"]
     old_notices, notices = old_observation["notices"], observation["notices"]
     new_notices = notices[len(old_notices):]
-    if notices[:len(old_notices)] != old_notices or not new_notices or any(
-        notice["kind"] not in {"weather_update", "forecast_update"} for notice in new_notices
-    ):
+    supported = {"weather_update", "forecast_update"}
+    if scoped_fares:
+        supported.add("stock_update")
+    if (notices[:len(old_notices)] != old_notices
+            or not any(notice["kind"] in supported for notice in new_notices)
+            or any(notice["kind"] not in supported for notice in new_notices)):
         return None
     if old_observation["operational_sources"] != observation["operational_sources"]:
         return None
@@ -835,15 +876,27 @@ def weather_delta(api, settings, payload, previous_packet, schema, label, *, eff
         return None
     offers = payload["offers"]
     old_offers = {offer["id"]: offer for offer in previous_packet["offers"]}
-    if {offer["id"] for offer in offers} != old_offers.keys() or any(
+    offer_ids = {offer["id"] for offer in offers}
+    if not scoped_fares and (offer_ids != old_offers.keys() or any(
         (offer.get("refund_contract_source") or {}).get("id") == forecast_key for offer in offers
-    ):
+    )):
         return None
+    if fare_programs is not None:
+        try:
+            refunds = bind_fare_programs(offers, fare_programs)
+        except ValueError:
+            return None
+    else:
+        refunds = [dict(offer_ids=[offer["id"]], retained=(
+            None if defer_fares else previous["refund_terms"][offer["id"]]
+        )) for offer in offers]
     # Search may refresh arrival and observation time. Preserve the complete
     # compiler when any other offer evidence changes.
     dynamic = {"arrival_minute", "observed_at"}
     for offer in offers:
-        old_offer = old_offers[offer["id"]]
+        old_offer = old_offers.get(offer["id"])
+        if old_offer is None:
+            continue
         if {k: v for k, v in offer.items() if k not in dynamic} != {
             k: v for k, v in old_offer.items() if k not in dynamic
         }:
@@ -851,22 +904,38 @@ def weather_delta(api, settings, payload, previous_packet, schema, label, *, eff
     facts_schema = schema["properties"]["facts"]["properties"]
     fields = dict(weather=facts_schema["weather"], forecasts=facts_schema["forecasts"],
                   weather_only={"type": "boolean"})
-    shape = dict(type="object", properties=fields, required=list(fields), additionalProperties=False)
+    traveler_fields = ("preferred", "requires_step_free", "avoid_carriers", "consent") if scoped_fares else ()
+    fields.update({key: {"anyOf": [facts_schema[key], {"type": "null"}]} for key in traveler_fields})
+    shape = object_schema(fields)
     instructions = (
         "Update actual delays by mode and unresolved forecasts from this observed update. "
         "Keep previous actual delays outside the update. A possibility is never an actual delay. "
         "Remove resolved forecasts. For an unresolved forecast use the virtual time of its expected "
         "final report, not the bulletin time; use null for unknown values. Set weather_only true "
         "when the update only reports weather, revised forecasts, their physical effects or instructions "
-        "to check affected bookings. Keep any pre-existing rules that depend on weather. Set it false "
-        "if the text itself adds or changes a non-weather rule, requirement, permission, or preference."
+        "to check affected bookings. Keep any pre-existing rules that depend on weather."
     )
+    if not traveler_fields:
+        instructions += (" Set it false if the text itself adds or changes a non-weather rule, "
+                         "requirement, permission, or preference.")
+    if traveler_fields:
+        instructions += (
+            " A notice may also amend eligibility, consent, or preference. Read all its clauses. "
+            "For preferred, requires_step_free, avoid_carriers and consent, use null when unchanged "
+            "and a complete replacement value only when explicitly amended. Copy any new consent "
+            "verbatim. Stock changes are handled by the search results, so a stock-only clause "
+            "requires no contract edit. Set weather_only true when all non-weather changes fit "
+            "these traveler fields or stock. Set it false for any other change, including a changed "
+            "spending or arrival rule, waiver, or transfer."
+        )
     old_facts = previous["facts"]
     detected = {}
     actual_update = any(n["kind"] == "weather_update" for n in new_notices)
     if actual_update:
         for offer in offers:
-            old_offer = old_offers[offer["id"]]
+            old_offer = old_offers.get(offer["id"])
+            if old_offer is None:
+                continue
             if offer.get("observed_at") == old_offer.get("observed_at"):
                 continue
             difference = offer["arrival_minute"] - old_offer["arrival_minute"]
@@ -881,17 +950,28 @@ def weather_delta(api, settings, payload, previous_packet, schema, label, *, eff
             detected[mode] = inferred
     instructions += (" Any corroborated actual delays shown in observed_arrival_deltas are authoritative. "
                      "Keep them as supplied and resolve forecasts for those reports where applicable.")
-    reply = api.json(dict(settings, effort=effort), instructions, dict(
+    evidence = dict(
         notices=new_notices, forecast=forecast["text"],
         weather=old_facts["weather"], forecasts=old_facts["forecasts"],
         observed_arrival_deltas=detected,
-    ), shape, dict(label, stage="weather_delta"))
+    )
+    if traveler_fields:
+        evidence["traveler"] = {key: old_facts[key] for key in traveler_fields}
+    reply = api.json(dict(settings, effort=effort), instructions, evidence, shape, dict(label, stage="weather_delta"))
     if not reply["weather_only"]:
         return None
+    traveler_patch = {key: reply[key] for key in traveler_fields if reply[key] is not None}
+    consent = traveler_patch.get("consent", old_facts["consent"])
+    if consent != old_facts["consent"] and (not consent or not any(
+            re.search(r"(?<![\w-])" + re.escape(consent) + r"(?![\w-])", n["text"]) for n in new_notices)):
+        return None
     facts = dict(old_facts, weather={**reply["weather"], **detected}, forecasts=reply["forecasts"])
-    return dict(budget_limit=previous["budget_limit"], arrival_deadline=previous["arrival_deadline"],
-                refund_groups=[dict(offer_ids=[key], retained=rule)
-                               for key, rule in previous["refund_terms"].items()], facts=facts)
+    facts.update(traveler_patch)
+    response = dict(budget_limit=previous["budget_limit"], arrival_deadline=previous["arrival_deadline"],
+                    refund_groups=refunds, facts=facts)
+    if fare_programs is not None:
+        response["fare_programs"] = fare_programs
+    return response
 
 
 class ForecastController(Controller):
@@ -994,6 +1074,46 @@ def apply_base_retention(expression, base):
     if expression == {"base_retention": True}:
         return base
     return {name: apply_base_retention(value, base) for name, value in expression.items()}
+
+
+def bind_fare_programs(offers, programs):
+    lookup = {(program["id"], program["version"]): program["retained"] for program in programs}
+    groups = []
+    for offer in offers:
+        ref = offer["refund_contract_source"]
+        key = (ref["id"], ref["version"])
+        if key not in lookup:
+            raise ValueError("No compiled fare for the offer's source version")
+        base = {"fee": offer["cancel_fee_usd"], "flexible": 0, "locked": None}[offer["change_policy"]]
+        groups.append(dict(offer_ids=[offer["id"]], retained=apply_base_retention(lookup[key], base)))
+    return groups
+
+
+def normalize_mode_comparisons(expression):
+    """Translate natural-language mode names only beside a typed mode variable."""
+    if isinstance(expression, list):
+        return [normalize_mode_comparisons(value) for value in expression]
+    if not isinstance(expression, dict):
+        return expression
+    node = {key: normalize_mode_comparisons(value) for key, value in expression.items()}
+    if node.get("op") not in {"eq", "ne", "in"}:
+        return node
+    modes = {"flight": "flight", "air": "flight", "train": "train", "rail": "train",
+             "coach": "coach", "bus": "coach"}
+    mode_refs = [{"var": f"{role}.mode"} for role in ("item", "candidate", "booking")]
+
+    def translate(value):
+        return modes.get(value.casefold(), value) if isinstance(value, str) else value
+
+    left, right = node["left"], node["right"]
+    if node["op"] == "in" and left in mode_refs and isinstance(right, list):
+        node["right"] = [translate(value) for value in right]
+    elif node["op"] != "in":
+        if left in mode_refs:
+            node["right"] = translate(right)
+        if right in mode_refs:
+            node["left"] = translate(left)
+    return node
 
 
 def compile_purchased_refund(api, settings, ticket, source, *, stage="purchased_fare"):
@@ -1180,11 +1300,13 @@ def solve(world, api, config, route_fn):
                 "the linked source leaves uncovered. Group offers only after resolving their terms."
             )
         try:
-            response = weather_delta(api, settings, payload, previous_packet, schema, label)
+            response = weather_delta(api, settings, payload, previous_packet, schema, label,
+                                     defer_fares=controller.defer_fares)
         except json.JSONDecodeError:
             try:
                 response = weather_delta(api, settings, payload, previous_packet, schema,
-                                         dict(label, attempt="weather_json_retry"), effort=settings["effort"])
+                                         dict(label, attempt="weather_json_retry"), effort=settings["effort"],
+                                         defer_fares=controller.defer_fares)
             except json.JSONDecodeError:
                 response = None
         if response is None and controller.defer_fares:
