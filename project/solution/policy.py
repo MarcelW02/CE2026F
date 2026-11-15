@@ -239,6 +239,8 @@ def decode_infix(source, clocks=None):
     def parse(node):
         if isinstance(node, ast.Constant) and type(node.value) in (int, float, str, bool, type(None)):
             return node.value
+        if isinstance(node, ast.Name) and node.id in {"true", "false", "null"}:
+            return {"true": True, "false": False, "null": None}[node.id]
         if isinstance(node, ast.Attribute):
             name = ast.unparse(node)
             if name in NUMBER_VARIABLES or name in STRING_VARIABLES or name in BOOLEAN_VARIABLES:
@@ -265,6 +267,10 @@ def decode_infix(source, clocks=None):
             for index, operator in enumerate(node.ops):
                 left = parse(operands[index])
                 right = parse(operands[index + 1])
+                if isinstance(operator, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+                    # Only ordering operands can use a quoted source clock as a number.
+                    left = (clocks or {}).get(left, left) if isinstance(left, str) else left
+                    right = (clocks or {}).get(right, right) if isinstance(right, str) else right
                 if isinstance(operator, ast.NotIn):
                     tests.append(dict(op="not", arg=dict(op="in", left=left, right=right)))
                 elif type(operator) in comparison:
@@ -647,7 +653,7 @@ def compact_initial(api, settings, instructions, payload, schema, label):
     return response
 
 
-def interpret_amendment(api, settings, payload, previous_packet, schema, label, *, defer_fares=False):
+def interpret_amendment(api, settings, payload, previous_packet, schema, label, *, defer_fares=False, compact_delta=False):
     """Compile only changed authority documents and affected fare terms."""
     prior = payload["previous"]
     if prior is None or previous_packet is None:
@@ -690,15 +696,23 @@ def interpret_amendment(api, settings, payload, previous_packet, schema, label, 
     evidence_ids = {sources[key]["id"] for key in rules} | {ref["id"] for ref in changed_fares.values()}
     fact_names = ("consent", "preferred", "requires_step_free", "avoid_carriers")
     fact_schema = schema["properties"]["facts"]["properties"]
-    properties = {key: schema["properties"][key] for key in rules}
+    properties = {key: {"type": ["number", "string"]} if compact_delta else schema["properties"][key]
+                  for key in rules}
     properties.update({key: {"anyOf": [fact_schema[key], {"type": "null"}]} for key in fact_names})
     if changed_fares:
         properties["refunds"] = object_schema({
             identifier: {"$ref": "#/$defs/refund_expression"} for identifier in changed_fares
         })
     properties["requires_full"] = {"type": "boolean"}
+    if compact_delta:
+        code_pattern = r"\bconsent-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b"
+        previous_consent = prior["facts"]["consent"]
+        if re.fullmatch(code_pattern, previous_consent):
+            references = sorted({code for notice in arrived for code in re.findall(code_pattern, notice["text"])})
+            properties["consent"] = {"type": ["string", "null"],
+                                     "enum": [None, previous_consent, *[code for code in references if code != previous_consent]]}
     shape = object_schema(properties)
-    if rules or changed_fares:
+    if not compact_delta and (rules or changed_fares):
         shape["$defs"] = schema["$defs"]
 
     instructions = """Compile the arrived user amendments from the listed current sources.
@@ -743,7 +757,16 @@ provided evidence. If requires_full is true, the caller ignores the other fields
             identifier: docs[identifier]["version"] for identifier in sorted(changed_docs)
             if identifier in {ref["id"] for ref in fare_sources.values()} and identifier not in evidence_ids
         }
-    reply = api.json(settings, instructions, evidence, shape, dict(label, stage="typed_amendment"))
+    stage = "typed_amendment"
+    if compact_delta:
+        stage = "compact_amendment"
+        instructions = """Apply only the arrived amendments. Use linked current documents for changed rules.
+Return numeric limits as numbers or Python expressions. The spending rule returns the TOTAL authorization, including charges the planner counts separately. Preserve its default and every condition. The arrival rule returns the binding client-site clock, including required transfer, without subtracting any transfer. An explicit clock may be copied as HH:MM.
+In an expression use value if condition else value, dotted variables, comparisons, and/or/not, +/- and min/max. candidate is the proposed ticket, booking the existing ticket, item the current member in exists/minimum over offers or holds. candidate.meeting_arrival is after transfer; state.retained_fees is fees retained from cancellation.
+Use null for unchanged traveler facts. Consent is the literal booking/cancellation token, so return null when no new token is issued. If a changed approval does not fit the token field, request a full review. Separate hard carrier exclusions from restrictions that only affect one ceiling branch. Purchase fare changes are tracked independently. Set requires_full for a needed change the scoped evidence cannot express."""
+        evidence.pop("fare_sources")
+        evidence.pop("new_fares")
+    reply = api.json(settings, instructions, evidence, shape, dict(label, stage=stage))
     if reply["requires_full"]:
         return None
     consent = reply["consent"]
@@ -753,6 +776,31 @@ provided evidence. If requires_full is true, the caller ignores the other fields
     facts = dict(prior["facts"], **{key: reply[key] for key in fact_names if reply[key] is not None})
     refunds = reply.get("refunds", {})
     result = {key: reply[key] if key in rules else prior[key] for key in rule_keys}
+    if compact_delta:
+        if reply["avoid_carriers"] is not None and any(
+                carrier not in prior["facts"]["avoid_carriers"]
+                and not any(re.search(r"(?<![\w-])" + re.escape(carrier) + r"(?![\w-])", text, re.IGNORECASE)
+                            for text in [*(n["text"] for n in arrived), *evidence["documents"].values()])
+                for carrier in reply["avoid_carriers"]):
+            return None
+        arrival_clocks = observed_clocks(payload)
+        try:
+            for key in rules:
+                clocks = arrival_clocks | observed_clocks(payload, key)
+                text = docs[sources[key]["id"]]["text"] if key == "budget_limit" else ""
+                result[key] = decode_grounded_limit(reply[key], clocks, text)
+            if "arrival_deadline" in rules:
+                arrival = client_deadline_value(result["arrival_deadline"])
+                if type(arrival) in (int, float) and not 0 <= arrival <= 1439:
+                    return None
+                result["arrival_deadline"] = arrival
+            if "budget_limit" in rules:
+                written = written_ceiling_values(payload)
+                ceiling = result["budget_limit"]
+                if type(ceiling) in (int, float) and written and written != {ceiling}:
+                    return None
+        except ValueError:
+            return None
     result.update(facts=facts, refund_groups=[
         dict(offer_ids=[identifier], retained=refunds[identifier] if identifier in refunds
              else None if defer_fares else prior["refund_terms"][identifier]) for identifier in offers
@@ -1139,6 +1187,9 @@ def solve(world, api, config, route_fn):
                                          dict(label, attempt="weather_json_retry"), effort=settings["effort"])
             except json.JSONDecodeError:
                 response = None
+        if response is None and controller.defer_fares:
+            response = interpret_amendment(api, settings, payload, previous_packet, schema, label,
+                                           defer_fares=True, compact_delta=True)
         if response is None:
             response = interpret_amendment(api, settings, payload, previous_packet, schema, label,
                                            defer_fares=controller.defer_fares)
