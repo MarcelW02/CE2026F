@@ -87,6 +87,61 @@ def route(observation, memory):
     return travel_route(observation, memory)
 
 
+def pack_observed_packet(payload):
+    """Factor offer fields shared by every row, preserving the observed values."""
+    offers = payload["offers"]
+    if not offers:
+        return payload
+    fields = list(dict.fromkeys(key for offer in offers for key in offer))
+    common = {key: offers[0][key] for key in fields if key in offers[0]
+              and all(key in offer and offer[key] == offers[0][key] for offer in offers)}
+    columns = [key for key in fields if key not in common]
+    # Missing and explicit null values are distinct in the source packet.
+    missing = {"absent": True}
+    if any(offer.get(key) == missing for offer in offers for key in columns):
+        return payload
+    rows = [[offer.get(key, missing) for key in columns] for offer in offers]
+    return dict(payload, offers=dict(shared=common, columns=columns, rows=rows))
+
+
+def offer_references(payload, shape):
+    """Use short, reversible aliases for opaque observed offer identifiers."""
+    identifiers = [offer["id"] for offer in payload["offers"]]
+    candidates = [identifier for identifier in identifiers
+                  if len(identifier) >= 12 and any(c.isdigit() for c in identifier)
+                  and re.fullmatch(r"[\w-]+", identifier)]
+    aliases = {identifier: f"@O{index}@" for index, identifier in enumerate(candidates)}
+    if not aliases or re.search(r"@O\d+@", json.dumps(payload)):
+        return payload, shape, {}
+
+    pattern = re.compile(r"(?<![\w-])(?:" + "|".join(
+        re.escape(item) for item in sorted(aliases, key=len, reverse=True)) + r")(?![\w-])")
+
+    def replace(value):
+        if isinstance(value, str):
+            return pattern.sub(lambda match: aliases[match[0]], value)
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    schema = deepcopy(shape)
+    groups = schema["properties"]["refund_groups"]["items"]["properties"]["offer_ids"]["items"]
+    groups["enum"] = [aliases.get(identifier, identifier) for identifier in groups["enum"]]
+    return replace(payload), schema, {alias: identifier for identifier, alias in aliases.items()}
+
+
+def restore_offer_references(value, references):
+    if isinstance(value, str):
+        return references.get(value, value)
+    if isinstance(value, list):
+        return [restore_offer_references(item, references) for item in value]
+    if isinstance(value, dict):
+        return {key: restore_offer_references(item, references) for key, item in value.items()}
+    return value
+
+
 def compact_initial(api, settings, instructions, payload, schema, label):
     """Share a strict expression grammar across contract output fields."""
     def request(local_settings, text, viewed, full, request_label):
@@ -116,7 +171,15 @@ def compact_initial(api, settings, instructions, payload, schema, label):
         visible = dict(viewed, offers=[{key: value for key, value in offer.items()
                                       if key not in {"observed_at", "fare_fields_scope"}}
                                      for offer in viewed["offers"]])
-        return api.json(local_settings, text, visible, shape, dict(request_label, stage="shared_expression"))
+        referenced, shape, references = offer_references(visible, shape)
+        packed = pack_observed_packet(referenced)
+        if isinstance(packed["offers"], dict):
+            text += ("\nOffers are a table. Each row inherits all shared fields and adds the values "
+                     "listed in columns in order. An absent marker means the field was missing.")
+        if references:
+            text += "\nUse the observed @O#@ offer references verbatim when returning an offer ID."
+        response = api.json(local_settings, text, packed, shape, dict(request_label, stage="packed_evidence"))
+        return restore_offer_references(response, references) if references else response
 
     response = interpret_with_consent_references(
         SimpleNamespace(json=request), settings, instructions, payload, schema, label,
