@@ -85,6 +85,88 @@ def route(observation, memory):
     return travel_route(observation, memory)
 
 
+def weather_delta(api, settings, payload, previous_packet, schema, label):
+    """Reinterpret a weather-only update without rebuilding unchanged contracts."""
+    previous = payload["previous"]
+    if previous is None or previous_packet is None:
+        return None
+    old_observation, observation = previous_packet["observation"], payload["observation"]
+    old_notices, notices = old_observation["notices"], observation["notices"]
+    new_notices = notices[len(old_notices):]
+    if notices[:len(old_notices)] != old_notices or not new_notices or any(
+        notice["kind"] not in {"weather_update", "forecast_update"} for notice in new_notices
+    ):
+        return None
+    if old_observation["operational_sources"] != observation["operational_sources"]:
+        return None
+    forecast_key = "weather-forecast"
+    old_documents = {d["id"]: d for d in previous_packet["documents"]}
+    documents = {d["id"]: d for d in payload["documents"]}
+    forecast = documents.pop(forecast_key, None)
+    old_forecast = old_documents.pop(forecast_key, None)
+    if not forecast or not old_forecast or documents != old_documents:
+        return None
+    offers = payload["offers"]
+    old_offers = {offer["id"]: offer for offer in previous_packet["offers"]}
+    if {offer["id"] for offer in offers} != old_offers.keys() or any(
+        (offer.get("refund_contract_source") or {}).get("id") == forecast_key for offer in offers
+    ):
+        return None
+    # Search may refresh arrival and observation time. Preserve the complete
+    # compiler when any other offer evidence changes.
+    dynamic = {"arrival_minute", "observed_at"}
+    for offer in offers:
+        old_offer = old_offers[offer["id"]]
+        if {k: v for k, v in offer.items() if k not in dynamic} != {
+            k: v for k, v in old_offer.items() if k not in dynamic
+        }:
+            return None
+    facts_schema = schema["properties"]["facts"]["properties"]
+    fields = dict(weather=facts_schema["weather"], forecasts=facts_schema["forecasts"],
+                  weather_only={"type": "boolean"})
+    shape = dict(type="object", properties=fields, required=list(fields), additionalProperties=False)
+    instructions = (
+        "Update actual delays by mode and unresolved forecasts from this observed update. "
+        "Keep previous actual delays outside the update. A possibility is never an actual delay. "
+        "Remove resolved forecasts. For an unresolved forecast use the virtual time of its expected "
+        "final report, not the bulletin time; use null for unknown values. Set weather_only true "
+        "when the update only reports weather, revised forecasts, their physical effects or instructions "
+        "to check affected bookings. Keep any pre-existing rules that depend on weather. Set it false "
+        "if the text itself adds or changes a non-weather rule, requirement, permission, or preference."
+    )
+    old_facts = previous["facts"]
+    detected = {}
+    actual_update = any(n["kind"] == "weather_update" for n in new_notices)
+    if actual_update:
+        for offer in offers:
+            old_offer = old_offers[offer["id"]]
+            if offer.get("observed_at") == old_offer.get("observed_at"):
+                continue
+            difference = offer["arrival_minute"] - old_offer["arrival_minute"]
+            if not offer["weather_exposed"]:
+                if difference:
+                    return None
+                continue
+            mode = offer["mode"]
+            inferred = old_facts["weather"][mode] + difference
+            if inferred < 0 or (mode in detected and detected[mode] != inferred):
+                return None
+            detected[mode] = inferred
+    instructions += (" Any corroborated actual delays shown in observed_arrival_deltas are authoritative. "
+                     "Keep them as supplied and resolve forecasts for those reports where applicable.")
+    reply = api.json(dict(settings, effort="none"), instructions, dict(
+        notices=new_notices, forecast=forecast["text"],
+        weather=old_facts["weather"], forecasts=old_facts["forecasts"],
+        observed_arrival_deltas=detected,
+    ), shape, dict(label, stage="weather_delta"))
+    if not reply["weather_only"]:
+        return None
+    facts = dict(old_facts, weather={**reply["weather"], **detected}, forecasts=reply["forecasts"])
+    return dict(budget_limit=previous["budget_limit"], arrival_deadline=previous["arrival_deadline"],
+                refund_groups=[dict(offer_ids=[key], retained=rule)
+                               for key, rule in previous["refund_terms"].items()], facts=facts)
+
+
 class ForecastController(Controller):
     def prepare(self, observation, booking):
         """Evaluate compatible delays from the same announced report together."""
@@ -150,9 +232,14 @@ def solve(world, api, config, route_fn):
         return supplied_agent(world, api, config, route_fn)
 
     traces = []
+    previous_packet = None
 
     def interpret(settings, instructions, payload, schema, label):
-        response = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
+        nonlocal previous_packet
+        response = weather_delta(api, settings, payload, previous_packet, schema, label)
+        previous_packet = payload
+        if response is None:
+            response = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
         try:
             normalize_response(response, payload["offers"])
         except ValueError as error:
