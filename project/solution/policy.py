@@ -5,6 +5,7 @@ all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from collections import defaultdict
+from framework.common import object_schema
 from framework.contract_interpreter import compile_contract, normalize_response
 from framework.contract_policy import Controller
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
@@ -83,6 +84,111 @@ def route(observation, memory):
     parsed trip state. Return domain names; edits to this argument do not persist.
     """
     return travel_route(observation, memory)
+
+
+def interpret_amendment(api, settings, payload, previous_packet, schema, label):
+    """Compile only changed authority documents and affected fare terms."""
+    prior = payload["previous"]
+    if prior is None or previous_packet is None:
+        return None
+    old_observation = previous_packet["observation"]
+    observation = payload["observation"]
+    old_notices = old_observation["notices"]
+    notices = observation["notices"]
+    arrived = notices[len(old_notices):]
+    if (not arrived or notices[:len(old_notices)] != old_notices
+            or any(notice["kind"] != "user_update" for notice in arrived)):
+        return None
+
+    old_docs = {doc["id"]: doc for doc in previous_packet["documents"]}
+    docs = {doc["id"]: doc for doc in payload["documents"]}
+    sources = observation["operational_sources"]
+    old_sources = old_observation["operational_sources"]
+    rule_keys = ("budget_limit", "arrival_deadline")
+    offers = {offer["id"]: offer for offer in payload["offers"]}
+    old_offers = {offer["id"]: offer for offer in previous_packet["offers"]}
+    fare_sources = {identifier: offer["refund_contract_source"] for identifier, offer in offers.items()}
+    refs = [sources[key] for key in rule_keys] + list(fare_sources.values())
+    if any(docs.get(ref["id"], {}).get("version") != ref["version"] for ref in refs):
+        return None
+    changed_docs = {key for key in docs.keys() | old_docs.keys() if docs.get(key) != old_docs.get(key)}
+    if not changed_docs <= {ref["id"] for ref in refs}:
+        return None
+    rules = [key for key in rule_keys if sources[key] != old_sources[key]
+             or sources[key]["id"] in changed_docs]
+
+    def fare_fields(offer):
+        return {key: value for key, value in offer.items() if key != "observed_at"}
+
+    changed_fares = {identifier: ref for identifier, ref in fare_sources.items()
+                     if identifier not in prior["refund_terms"]
+                     or fare_fields(offers[identifier]) != fare_fields(old_offers.get(identifier, {}))
+                     or ref["id"] in changed_docs}
+    evidence_ids = {sources[key]["id"] for key in rules} | {ref["id"] for ref in changed_fares.values()}
+    fact_names = ("consent", "preferred", "requires_step_free", "avoid_carriers")
+    fact_schema = schema["properties"]["facts"]["properties"]
+    properties = {key: schema["properties"][key] for key in rules}
+    properties.update({key: {"anyOf": [fact_schema[key], {"type": "null"}]} for key in fact_names})
+    if changed_fares:
+        properties["refunds"] = object_schema({
+            identifier: {"$ref": "#/$defs/refund_expression"} for identifier in changed_fares
+        })
+    properties["requires_full"] = {"type": "boolean"}
+    shape = object_schema(properties)
+    if rules or changed_fares:
+        shape["$defs"] = schema["$defs"]
+
+    instructions = """Compile the arrived user amendments from the listed current sources.
+Return complete executable expressions for the requested rules. Use the previous rule
+only to keep terms outside the amendment's scope. Return the TOTAL spending ceiling.
+The planner compares the total ledger expense against your result. If the amended
+authority states a new total ceiling of USD 240, return 240. Retained charges, current
+spending and hotel fees are counted by the planner. Subtract costs only if the source
+explicitly specifies a formula for the ceiling itself. Keep any conditions that change
+the total ceiling. Arrival is the binding client-site clock deadline in minutes
+since midnight, before subtracting any transfer. Refunds are dollars retained or null
+for prohibited cancellation. Apply each fare document to its corresponding offer only.
+Use candidate for the proposed ticket, booking for the existing booking and item only
+inside the offers or holds quantifier. Meeting arrival includes transfer. state.now is
+the action completion minute. state.total_refunds means actual credits received.
+Put a conditional threshold in the numeric branches of an if. Approval codes are
+ordinary facts, never a state variable or part of a monetary expression.
+Return null for each unchanged traveler fact, or the full new value if explicitly amended.
+Copy any new consent code verbatim from the arrived notices. Reuse prior facts for
+unchanged authority. The model can update several fields together. For example, a
+new carrier restriction can be returned in avoid_carriers alongside a revised budget
+expression. Keep booking eligibility conditions in the correct expression. Mention of
+an unchanged rule does not require recompiling it. Request a full interpretation
+only if a required expression or newly changed fact cannot be represented from the
+provided evidence. If requires_full is true, the caller ignores the other fields."""
+    evidence = dict(
+        notices=arrived,
+        documents={key: docs[key]["text"] for key in sorted(evidence_ids)},
+        rule_sources={key: sources[key] for key in rules},
+        previous={key: prior[key] for key in rules},
+        traveler={key: prior["facts"][key] for key in fact_names},
+        fare_sources=changed_fares,
+        new_fares={identifier: offers[identifier] for identifier in changed_fares},
+    )
+    reply = api.json(settings, instructions, evidence, shape, dict(label, stage="typed_amendment"))
+    if reply["requires_full"]:
+        return None
+    consent = reply["consent"]
+    if consent not in (None, prior["facts"]["consent"]) and (not consent or not any(
+            consent in notice["text"] for notice in arrived)):
+        return None
+    facts = dict(prior["facts"], **{key: reply[key] for key in fact_names if reply[key] is not None})
+    refunds = reply.get("refunds", {})
+    result = {key: reply[key] if key in rules else prior[key] for key in rule_keys}
+    result.update(facts=facts, refund_groups=[
+        dict(offer_ids=[identifier], retained=refunds[identifier] if identifier in refunds
+             else prior["refund_terms"][identifier]) for identifier in offers
+    ])
+    try:
+        normalize_response(result, payload["offers"])
+    except ValueError:
+        return None
+    return result
 
 
 def weather_delta(api, settings, payload, previous_packet, schema, label):
@@ -236,7 +342,23 @@ def solve(world, api, config, route_fn):
 
     def interpret(settings, instructions, payload, schema, label):
         nonlocal previous_packet
+        if payload["previous"] is None:
+            instructions += (
+                "\nBefore encoding refund_groups, resolve each offer's linked fare source and version "
+                "against that offer's carrier, mode and any other clause qualifiers. "
+                "Apply the most specific matching clause even when the offer's base change policy "
+                "or cancellation fee conflicts with the source. The expression is dollars retained: "
+                "a full refund retains 0, a partial refund retains the unreturned amount, and a "
+                "prohibition on cancelling returns null. Keep conditions in the expression so their "
+                "eligibility can be evaluated at cancellation. The holds pool already contains only "
+                "live holds at action completion. For a rule requiring a live hold, filter the holds pool "
+                "by the stated qualifications. Never add an expired-hold condition for a live hold. "
+                "Use base terms only for situations "
+                "the linked source leaves uncovered. Group offers only after resolving their terms."
+            )
         response = weather_delta(api, settings, payload, previous_packet, schema, label)
+        if response is None:
+            response = interpret_amendment(api, settings, payload, previous_packet, schema, label)
         previous_packet = payload
         if response is None:
             response = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
