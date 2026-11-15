@@ -11,15 +11,15 @@ The final solver passed **60 of 60 Public episodes** and scored **100/100** in t
 
 The implementation changes are in [config.py](project/solution/config.py), [policy.py](project/solution/policy.py), and [prompts.py](project/solution/prompts.py).
 
-## Benchmark vs. final solver
+## Baseline vs. final solver
 
 | Split | Solver | Successful episodes | Outcome points | Model calls | Grading cost (USD) | Public score |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Dev | v10 starter | 3/9 | 40/90 | 21 | $0.02566 | — |
+| Dev | Baseline (unmodified staff v10 starter) | 3/9 | 40/90 | 21 | $0.02566 | — |
 | Dev | Final | 9/9 | 90/90 | 18 | $0.01209 | — |
-| Public | Benchmark reference | 56/60 | 86.17/90 | 99 | $0.15355 | 87.73/100 |
+| Public | Baseline (our first full Public run) | 56/60 | 86.17/90 | 99 | $0.15355 | 87.73/100 |
 | Public | Final (two runs) | 60/60 each | 90/90 each | 20 each | $0.01507 and $0.01428 | 100/100 each |
 
-The Public reference is our first full run with one interpreter and context refresh. We evaluated the unmodified v10 starter on Dev. These are local results from the course runner. The TA runs the official evaluation.
+We ran the unmodified staff v10 starter on Dev only. For the Public baseline, we used our first full Public run, which already used one interpreter, context refresh, and a prompt that asked for exact consent and hotel-waiver evidence. These are local results from the course runner. The TA runs the official evaluation.
 
 See the [experiment log](EXPERIMENT-LOG.md) for intermediate results and discarded changes. Follow the [course setup instructions](README.md#start-here) to run the benchmarks.
