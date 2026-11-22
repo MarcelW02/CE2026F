@@ -4,7 +4,7 @@ The target is a 100/100 benchmark score on the staff evaluation. The development
 
 ## November 15, 2026 baseline
 
-Staff v10 commit `7b0f4197de9826f3ff3081f2317ddcb74f678da7`. The working solver uses GPT-5.6 Luna at low effort, a combined interpreter, context refresh, precaution, and a prompt requiring literal consent and current waiver evidence. The original v10 solver remains available as a historical control.
+Staff v10 commit `7b0f4197de9826f3ff3081f2317ddcb74f678da7`. At this stage, the working solver used GPT-5.6 Luna at low effort, a combined interpreter, context refresh, precaution, and a prompt requiring literal consent and current waiver evidence. The original v10 solver remains available as a historical control.
 
 | Run | Change | Complete episodes | Mean outcome /90 | Grading cost | Local score /100 |
 |---|---|---:|---:|---:|---:|
@@ -147,6 +147,30 @@ The local budget launcher now accepts an explicit worker count. This batch uses 
 - **Decision.** Keep implementation `6e0a4e52286860b9db16d156791ee57e4eed67f96cb53bc20a9ffde6c9f522a7`. Verified that the working source and verified solver ZIP match both perfect runs. The ZIP contains the three allowed Python files and their manifest. Protected files passed verification.
 
 Experiments 13–15 used **$0.05450615 in estimated API spend**, within the $0.25 batch cap. The verified result covers the published Public bank. The solver falls back to the model on unfamiliar documents, and staff evaluation on team-contributed and hidden cases remains unverified.
+
+## Move beyond wording-specific parsers
+
+The branch removed parsers that matched specific contract wording. GPT-6 Luna reads the current spending and arrival authorities alongside their linked documents. Its compact expressions preserve ordered exceptions and are validated before the planner evaluates live quotes. Scoped amendment and weather requests carry forward unchanged rules. When refreshed arrivals corroborate an operating delay, the weather update uses that evidence. The planner can evaluate several delays from the same forecast report together.
+
+Forecast compilation produces fare rules by source and version so compatible new offers can use the same rules. The booking-first path defers refund interpretation until a plausible replacement needs it, then uses the fare terms observed at purchase. The booking-only path uses GPT-6 Luna. A failed no-reasoning initial call gets a low-effort retry only when recorded usage shows that it reached its output limit.
+
+## Forecast spending scope and client-clock repair
+
+The pre-repair Public run passed 59/60 and scored 97.33/100. The missed episode applied the original ticket's weather exposure to the replacement spending allowance and subtracted terminal transfer from a client-site deadline. That combination blocked a recovery hold before the sale closed.
+
+The repair checks for those patterns and sends only the affected spending or arrival fields for review, with their observed authorities and linked definitions. The review distinguishes the service whose delay triggers an allowance from the tickets the allowance covers. The planner adds transfer to the itinerary's terminal arrival. A written offset can still change the deadline. The offline replay recovered the missed episode, and a second fixture verified that an invalid mode could be retried in isolation while keeping the accepted spending rule.
+
+## Current solver verification
+
+The November 16 Dev and Public reports both recorded the exact three solver files in `eb357ec`. Their implementation SHA-256 is `a9320e9c433675b32c74be6acb3cd6815c594b28d3988f9e19711683f2632dfd`.
+
+| Run | Successful episodes | Outcome points | Model calls | Grading cost (USD) | Public score |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Dev | 9/9 | 90/90 | 21 | $0.00484690 | — |
+| Public before the scope and clock repair | 59/60 | 89.33/90 | 132 | $0.03012000 | 97.33/100 |
+| Public with the repair | 60/60 | 90/90 | 133 | $0.03038830 | 97.92/100 |
+
+The current solver passed both repetitions of the previously missed Public case. It earned full outcome points, with grading cost above the $0.02407475 allowance. Separate local stress runs passed 9/9 on the new wording variations, 9/9 on the linked-source Forecast repeat, and 7/9 on the combined-condition repeat. Both remaining misses involved interpreting the wording around an operator name as part of its identifier. These runs measure local performance. See the [course scoring guide](project/README.md#7-understand-the-100-point-score) for the official evaluation.
 
 ## Recording future experiments
 
