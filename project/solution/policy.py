@@ -425,53 +425,212 @@ def numeric_envelope(expression):
     return None
 
 
-def compile_booking_slots(api, settings, evidence, drafts, clocks, label, *, audit_collapse=False):
+def linked_documents(root_id, documents):
+    """Resolve explicit links using only the currently observed document versions."""
+    observed = {doc["id"]: doc for doc in documents}
+    if len(observed) != len(documents) or root_id not in observed:
+        return {}
+    links = {}
+    pending = list(observed[root_id]["related"])
+    while pending:
+        identifier = pending.pop()
+        if identifier == root_id or identifier in links or identifier not in observed:
+            continue
+        doc = observed[identifier]
+        links[identifier] = {key: doc[key] for key in ("version", "title", "text")}
+        pending.extend(doc["related"])
+    return links
+
+
+MODE_WORDS = {
+    "flight": r"(?:air|flights?|planes?|aviation)",
+    "train": r"(?:trains?|rail(?:way)?)",
+    "coach": r"(?:coach(?:es)?|bus(?:es)?)",
+}
+
+
+def check_authority_roles(program, field, text):
+    """Review predicates that attribute a scope to the wrong domain field."""
+    mode_mentions = {mode for mode, words in MODE_WORDS.items()
+                     if re.search(r"\b" + words + r"\b", text, re.IGNORECASE)}
+    operating_mentions = {mode for mode, words in MODE_WORDS.items()
+                          if re.search(r"\b" + words + r"\s+(?:delay|disruption)s?\b", text, re.IGNORECASE)}
+
+    def check(node):
+        if isinstance(node, list):
+            for item in node:
+                check(item)
+            return
+        if not isinstance(node, dict):
+            return
+        variable = node.get("var", "")
+        weather = "state.weather."
+        if variable.startswith(weather) and len(operating_mentions) == 1:
+            if variable.removeprefix(weather) not in operating_mentions:
+                raise ValueError("Weather predicate uses another mode than the named operating delay. "
+                                 "Separate the delayed mode from the eligible replacement mode.")
+        if field == "arrival_deadline" and node.get("op") in {"eq", "ne", "in"}:
+            for role, literal in ((node["left"], node["right"]), (node["right"], node["left"])):
+                if role != {"var": "candidate.mode"} or not isinstance(literal, (str, list)):
+                    continue
+                values = literal if isinstance(literal, list) else [literal]
+                if any(isinstance(value, str) and value not in mode_mentions for value in values):
+                    raise ValueError("The written arrival scope does not name that transport mode. "
+                                     "Check whether it names an operator or quote instead.")
+        for child in node.values():
+            check(child)
+
+    check(program)
+
+
+def expression_variables(value):
+    if isinstance(value, dict):
+        if "var" in value:
+            return {value["var"]}
+        value = value.values()
+    elif not isinstance(value, list):
+        return set()
+    return set().union(*(expression_variables(child) for child in value))
+
+
+def mixes_operating_delay_and_ticket_scope(rule):
+    variables = expression_variables(rule)
+    return (any(name.startswith("state.weather.") for name in variables)
+            and any(name.startswith(("candidate.", "booking.")) for name in variables))
+
+
+def has_transfer_shift(rule, clocks, transfers):
+    """Find output branches consistent with subtracting transfer from a written clock."""
+    if isinstance(rule, dict) and rule.get("op") == "if":
+        return any(has_transfer_shift(rule[key], clocks, transfers) for key in ("then", "else"))
+    if isinstance(rule, dict) and rule.get("op") == "sub":
+        left, right = rule["args"]
+        if type(left) in (int, float) and type(right) in (int, float):
+            rule = left - right
+    return (type(rule) in (int, float) and rule not in clocks
+            and any(clock - transfer == rule for clock in clocks for transfer in transfers))
+
+
+def compile_booking_slots(api, settings, evidence, drafts, clocks, label, *,
+                          audit_collapse=False, documents=(), transfers=()):
     sources = {field: doc["text"] for doc in evidence["authorities"] for field in doc["fields"]}
     spending = sources["budget_limit"]
     programs, rejected = {}, {}
     amounts = {float(value.replace(",", "")) for value in re.findall(
         r"(?:\bUSD\s+|\$)(\d+(?:,\d{3})*(?:\.\d+)?)", spending, re.IGNORECASE)}
 
+    linked_by_field = {field: linked_documents(authority["id"], documents)
+                       for authority in evidence["authorities"] for field in authority["fields"]}
+
+    def check_roles(field, rule):
+        text = "\n".join([sources[field], *(doc["title"] + "\n" + doc["text"]
+                                                  for doc in linked_by_field[field].values())])
+        rule = normalize_mode_comparisons(rule)
+        check_authority_roles(rule, field, text)
+        return rule
+
     def decode(field, draft):
         result = decode_booking_slot(field, decision_rows_source(draft), clocks[field],
                                      spending if field == "budget_limit" else "")
-        if audit_collapse:
+        result = check_roles(field, result)
+        if field == "budget_limit" and audit_collapse and mixes_operating_delay_and_ticket_scope(result):
+            raise ValueError("Independently establish which proposed tickets qualify, separately from "
+                             "the operating delay that activates the authorization.")
+        if field == "arrival_deadline" and has_transfer_shift(result, clocks[field].values(), transfers):
+            raise ValueError("Verify this client clock against the authority. Apply only a written "
+                             "deadline offset. The planner already adds terminal-to-client transfer.")
+        bounds = numeric_envelope(result)
+        if bounds is not None and bounds[0] == bounds[1]:
             values = amounts if field == "budget_limit" else set(clocks[field].values())
-            if len(values) > 1:
-                bounds = numeric_envelope(result)
-                if bounds and bounds[0] == bounds[1]:
-                    raise ValueError("Several written values remain but the draft always returns one; verify whether an exception was suppressed")
+            dependent = linked_by_field[field]
+            mode_duration = (field == "arrival_deadline"
+                             and any(re.search(r"\b" + word + r"\b", sources[field], re.IGNORECASE)
+                                     for word in MODE_WORDS.values())
+                             and re.search(r"\b\d+\s+minutes?\b", sources[field], re.IGNORECASE))
+            if dependent or mode_duration or audit_collapse and len(values) > 1:
+                raise ValueError("Verify whether linked definitions, scoped offsets or other written "
+                                 "values change this constant rule. Keep it if the scope is uniform.")
         return result
 
     for field, draft in drafts.items():
         try:
             programs[field] = decode(field, draft)
         except ValueError as error:
-            rejected[field] = {"draft": draft, "diagnostic": str(error)}
+            rejected[field] = str(error)
     if not rejected:
         return programs
     instructions = """Repair only the requested failed authorization fields from their authoritative text. Keep all applicable conditions and exceptions.
-Use Python expressions with numbers and conditional expressions. Budget is TOTAL authorized dollars and arrival is the client clock before transfer. Use clock("HH:MM") for observed clocks. In the offers pool the price is item.price and client arrival is item.meeting_arrival.
+Use Python expressions with numbers and conditional expressions. Budget is TOTAL authorized dollars and arrival is the deadline at the client site. The planner already adds transfer to terminal arrival. Use clock("HH:MM") for observed clocks. In the offers pool the price is item.price and client arrival is item.meeting_arrival.
 Use exists("offers", predicate) to test whether a quote exists; minimum("offers", predicate, item.price, fallback) gives the lowest eligible price. The pool already includes the candidate's valid held quote. Use candidate.price for the proposed fare and put item only inside the pool predicate or value. Do not put a current quote's price or arrival in the program."""
+    instructions += (
+        "\nUse state.weather.MODE for realized operating delay and state.now for virtual "
+        "completion minutes. Query offers or holds only. For a deadline stated as a relative "
+        "offset, use clock() with the written base clock and apply the offset in minutes. "
+        "If the offset applies to a subset, return a conditional expression with the ordinary "
+        "clock in the other branch. A clock() argument must appear in the supplied clock list."
+    )
     if audit_collapse:
         instructions += ("\nInclude each distinct applicable spending authorization. Do not cap an exception "
                          "at the ordinary limit unless the source specifically requires that cap. "
                          "Preserve conditional client clocks and fare or carrier scope even for future "
                          "inventory that has not been searched yet.")
-    schema = object_schema(dict.fromkeys(rejected, {"type": "string"}))
-    reply = api.json(settings, instructions, {
-        "authority": {field: sources[field] for field in rejected},
-        "rejected": rejected,
-        "clocks": {field: list(clocks[field]) for field in rejected},
-        "quoted_offer_ids": evidence["observed_offer_ids"],
-    }, schema, dict(label, stage="initial_slot_review"))
-    for field in rejected:
-        programs[field] = decode_booking_slot(field, reply[field], clocks[field],
-                                              spending if field == "budget_limit" else "")
-    return programs
+    instructions += ("\ncandidate.mode accepts only flight, train or coach. A named operator "
+                     "goes in candidate.carrier, using the spelling in the current source. "
+                     "An operator-specific exception does not cover every ticket of that mode. "
+                     "The service that triggers a delay-based allowance can differ from the authorized replacement. "
+                     "Add ticket mode, carrier or exposure restrictions only where this field's source sets them.")
+    titles = {doc["id"]: doc["title"] for doc in documents}
+    authority_titles = {field: titles.get(authority["id"], "")
+                        for authority in evidence["authorities"] for field in authority["fields"]}
+    pending = rejected
+    for attempt in range(2):
+        fields = tuple(pending)
+        repair_body = {
+            "authority": {field: sources[field] for field in fields},
+            "authority_titles": {field: authority_titles[field] for field in fields},
+            "rejected": pending,
+            "clocks": {field: list(clocks[field]) for field in fields},
+            "quoted_offer_ids": evidence["observed_offer_ids"],
+        }
+        links = {field: linked_by_field[field] for field in fields if linked_by_field[field]}
+        if links:
+            repair_body["linked_definitions"] = links
+        shape = object_schema(dict.fromkeys(fields, {"type": "string"}))
+        review_label = dict(label, stage="initial_slot_review")
+        if attempt:
+            review_label["attempt"] = "slot_validation_retry"
+        reply = api.json(settings, instructions, repair_body, shape, review_label)
+        pending = {}
+        for field in fields:
+            try:
+                programs[field] = check_roles(field, decode_booking_slot(
+                    field, reply[field], clocks[field], spending if field == "budget_limit" else ""))
+            except ValueError as error:
+                if attempt:
+                    raise
+                pending[field] = str(error)
+        if not pending:
+            return programs
 
 
-def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=False):
+BOOKING_ONLY_INSTRUCTIONS = """Compile the current outbound booking rules from observed evidence.
+b is the total authorized dollars; a is the binding client-site deadline. Use a number
+or exact HH:MM for a fixed limit, or a Python expression for conditional or computed limits.
+Keep all qualifiers and exceptions, including linked definitions. The planner counts charges,
+adds terminal transfer, and evaluates the proposed quote as candidate. Use candidate.carrier
+for the operator, candidate.mode for flight/train/coach, and candidate.meeting_arrival for the
+client arrival. Use clock("HH:MM") for a written local clock and state.now for virtual minutes.
+Only offers and holds are query pools: item is their member in exists() or minimum().
+Documents by ID contain [version, title, text, ...links]. Tabular offers inherit shared fields
+and rows follow columns. Read arrived notices and the current operative source versions.
+Return applicable consent and waiver evidence verbatim, including the bulletin version.
+Read the transport guide; return a single transfer duration if it applies to all modes,
+otherwise give the full mode map. Keep the preference, access and hard carrier restrictions.
+Report actual weather only when observed and unresolved forecasts only when reported.
+Compile the rules without choosing a quote."""
+
+
+def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=False, simple=False):
     def request(local_settings, instructions, viewed, full, call_label):
         clocks = observed_clocks(viewed)
         policy_clocks = clocks | observed_clocks(viewed, "budget_limit")
@@ -498,8 +657,8 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
             packed["fare_sources"] = {index: list(ref) for ref, index in fares.items()}
         else:
             packed = pack_observed_packet(referenced)
-        scoped = defer and local_settings["model"] != "gpt-5-nano"
-        isolate = defer and not scoped
+        scoped = defer and not simple
+        isolate = defer and simple
         if isolate:
             text = "\n".join(doc["text"] for doc in referenced["documents"])
             text += "\n" + "\n".join(notice["text"] for notice in referenced["observation"]["notices"])
@@ -539,7 +698,7 @@ def cited_infix_initial(api, settings, payload, base_schema, label, *, defer=Fal
         if approvals:
             facts["properties"]["consent"]["enum"] = [*approvals, ""]
         string = {"type": "string"}
-        use_literals = scoped or local_settings["model"] == "gpt-5-nano"
+        use_literals = defer
         limit = {"anyOf": [{"type": "number"}, string]} if use_literals else string
         props = dict(b=limit, a=limit, facts=facts)
         decision_rows = not defer
@@ -569,24 +728,39 @@ For b, a and each fare rule write a single expression if unconditional. For exce
 Python test => result row per line with the most specific applicable exception first. End with
 otherwise => ordinary result. Both the test and result are Python expressions. Include future conditions.
 Use clock("HH:MM") for explicit clocks. Use candidate.meeting_arrival directly for client-site arrival.
+For each field use its own authority. The service whose actual delay triggers a spending allowance may
+differ from the replacement the allowance covers. Carry eligibility across fields only when the source
+links them. For a stated client clock return the clock itself; the planner adds any transfer to arrivals.
 Use booking.option_id for the purchased quote ID, item inside its pool, and quote the "offers" or "holds" pool.
 """
         shape = object_schema(props)
         stage = "source_compiler" if scoped else "booking_only" if defer else "cited_infix"
-        primary = dict(local_settings, effort="none") if decision_rows else local_settings
+        sources = referenced["observation"]["operational_sources"]
+        linked_rules = decision_rows and any(
+            linked_documents(ref["id"], referenced["documents"]) for ref in sources.values()
+        )
+        primary = local_settings
+        if decision_rows and not linked_rules:
+            primary = dict(local_settings, effort="none")
+        if simple:
+            instructions = BOOKING_ONLY_INSTRUCTIONS
+            if approvals:
+                instructions += " Consent aliases stand for the exact approval; copy the applicable alias."
+            if policy_clocks:
+                instructions += " Observed clock labels: " + ", ".join(policy_clocks) + "."
+        prior_output = api.usage()["output_tokens"] if primary != local_settings else None
         try:
             raw = api.json(primary, instructions, packed, shape, dict(call_label, stage=stage))
         except ResponseFailure:
-            if not decision_rows:
+            if prior_output is None:
                 raise
-            records = api.records
-            last = records[-1] if records else {}
-            details = (last.get("raw_response") or {}).get("incomplete_details") or {}
-            if (last.get("status") != "incomplete" or details.get("reason") != "max_output_tokens"
-                    or last.get("estimated_usd") is None):
+            usage = api.usage()
+            output = usage["output_tokens"]
+            if (usage["estimated_usd"] is None or output is None
+                    or output - prior_output < primary["max_output_tokens"]):
                 raise
             raw = api.json(local_settings, instructions, packed, shape,
-                           dict(call_label, stage=stage, attempt="accounted_token_limit"))
+                           dict(call_label, stage=stage, attempt="accounted_response_retry"))
         if use_literals and type(raw["facts"]["transfer"]) in (int, float):
             raw["facts"]["transfer"] = dict.fromkeys(("flight", "train", "coach"), raw["facts"]["transfer"])
         if defer:
@@ -602,23 +776,13 @@ Use booking.option_id for the purchased quote ID, item inside its pool, and quot
             fare_programs = [dict(id=ref[0], version=ref[1], retained=rules[index])
                              for ref, index in fares.items()]
             refund_groups = bind_fare_programs(offers, fare_programs)
-        if scoped or decision_rows:
-            evidence = packed if scoped else policy_evidence(referenced)
-            slots = compile_booking_slots(
-                api, local_settings, evidence, {"budget_limit": raw["b"], "arrival_deadline": raw["a"]},
-                {"budget_limit": policy_clocks, "arrival_deadline": clocks}, call_label, audit_collapse=decision_rows)
-            budget, arrival = slots["budget_limit"], slots["arrival_deadline"]
-        elif use_literals:
-            ref = viewed["observation"]["operational_sources"]["budget_limit"]
-            spending = next((doc["text"] for doc in viewed["documents"]
-                             if doc["id"] == ref["id"] and doc["version"] == ref["version"]), "")
-            if isinstance(raw["b"], str) and raw["b"].strip() in policy_clocks:
-                raise ValueError("A budget is expressed in dollars")
-            budget = decode_grounded_limit(raw["b"], policy_clocks, spending)
-            arrival = decode_grounded_limit(raw["a"], clocks)
-        else:
-            budget = decode_infix(raw["b"], policy_clocks)
-            arrival = decode_infix(raw["a"], clocks)
+        evidence = packed if scoped else policy_evidence(referenced)
+        slots = compile_booking_slots(
+            api, local_settings, evidence, {"budget_limit": raw["b"], "arrival_deadline": raw["a"]},
+            {"budget_limit": policy_clocks, "arrival_deadline": clocks}, call_label,
+            audit_collapse=decision_rows, documents=referenced["documents"],
+            transfers=tuple(raw["facts"]["transfer"].values()))
+        budget, arrival = slots["budget_limit"], slots["arrival_deadline"]
         response = dict(budget_limit=budget, arrival_deadline=client_deadline_value(arrival),
                         refund_groups=refund_groups, facts=raw["facts"])
         if not defer:
@@ -746,6 +910,10 @@ def review_planning_rules(api, settings, payload, response, controller, label, *
                     transfer=response["facts"]["transfer"],
                     candidates=[{key: offer[key] for key in ("id", "mode", "carrier", "price", "arrival_minute", "step_free")}
                                 for offer in payload["offers"]])
+    definitions = {key: links for key in fields if
+                   (links := linked_documents(authority[key]["id"], payload["documents"]))}
+    if definitions:
+        evidence["linked_definitions"] = definitions
     if "arrival_deadline" in fields:
         evidence["clock_minutes"] = clocks
     shape = object_schema(dict.fromkeys(fields, {"type": "string"}))
@@ -1479,13 +1647,12 @@ def solve(world, api, config, route_fn):
         if response is None and payload["previous"] is None:
             try:
                 defer_fares = not any(doc["id"] == "weather-forecast" for doc in payload["documents"])
-                use_nano = defer_fares and simple_literal_authorities(payload)
-                first_settings = dict(settings, model="gpt-5-nano", effort="minimal") if use_nano else settings
-                response = cited_infix_initial(api, first_settings, payload, schema, label, defer=defer_fares)
+                simple = defer_fares and simple_literal_authorities(payload)
+                response = cited_infix_initial(api, settings, payload, schema, label, defer=defer_fares, simple=simple)
                 if defer_fares:
                     response = review_unanchored_transfer(api, settings, payload, response, label)
                 response = review_planning_rules(api, settings, payload, response, controller, label,
-                                                 verify_literals=use_nano)
+                                                 verify_literals=simple)
                 controller.defer_fares = defer_fares
             except ValueError:
                 try:
