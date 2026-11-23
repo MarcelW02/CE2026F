@@ -294,6 +294,35 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
 - **Change.** At boot, the claim also goes first when claiming after the reads would reach the bulletin's stated "before (virtual) minute N" cutoff. The reads then end at 8 instead of 6, and the first confirmation still lands at 11. With the usual minute-30 cutoff, nothing changes.
 - **Result.** stress_v4 9/9; Public 100/100, 0 calls. **Decision.** Keep.
 
+## Experiment L7 — Lean expression grammar for scoped calls (2026-11-23)
+
+- **Measurement.** The initial call averages about 2,750 input tokens: schema about 1,080, instructions about 780, documents about 400, offers about 220 and the request notice about 200. Input is 66% of its cost. Across 1,862 recorded outputs, the following never appeared:
+  - the predicate-level and value-level `if`, `in`, list values, `or` and `max`;
+  - more than half of the variable names.
+
+  Pruning only the names saved 130 tokens, because enums render compactly. Removing grammar branches saved more. Paired test calls on identical requests:
+
+  | Request | Original | Lean | Saving |
+  |---|---:|---:|---:|
+  | With refunds | 3,630 tokens | 3,381 tokens | −6.9% |
+  | Budget and arrival only | 2,200 tokens | 1,909 tokens | −13.2% |
+
+- **Change.** `lean_definitions` drops:
+  - the predicate `in` and `if` branches, and the value list and `if` branches;
+  - timestamp, status and base-fare fields, `*.id`, `candidate/booking.expires_at` and four ledger subtotals;
+  - all of `booking.*` unless refund groups are requested, because booking is empty before purchase.
+
+  `or`, `max`, `sub`, `not`, `booking.price`, `hold_fee_usd`, `state.retained_fees` and `state.net_spend` stay. Only scoped calls use it; the full fallback keeps the supplied grammar. Every lean output is valid under the supplied grammar.
+- **Live.** The first attempt was interrupted by an API connection outage (`request_error`, then the unknown-cost guard) and says nothing about the change. The rerun:
+
+  | Runs | Episodes passed | Calls | Input tokens per call | Cost per episode |
+  |---|---|---:|---:|---:|
+  | L6 (`T6` + `T7_s4`) | 75/75 | 120 | 2,396 | $0.000559 |
+  | **L7 (`T9`)** | **75/75** | 120 | 2,150 (−10%) | **$0.000519 (−7%)** |
+
+  Dev and team cases now cost about the allowance (projected total 100).
+- **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.

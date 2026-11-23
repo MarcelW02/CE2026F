@@ -529,6 +529,45 @@ def read_weather_event(new_notices, forecast, earlier_forecast, facts):
     return {"weather": weather, "forecasts": [deepcopy(row) for row in facts["forecasts"] if row["mode"] != mode]}
 
 
+UNUSED_FIELDS = ("held_at", "confirmed_at", "status", "change_policy", "cancel_fee_usd", "available_from", ".id")
+UNUSED_VARIABLES = {"candidate.expires_at", "booking.expires_at", "state.total_refunds", "state.uncredited_hold_deposits",
+                    "state.retained_hold_fees", "state.total_retained_loss", "state.hotel_fee"}
+
+
+def lean_definitions(definitions, keep_booking):
+    """The supplied expression grammar without the forms and names no scoped call has used.
+
+    Across 1,862 recorded outputs, the predicate/value-level `if`, `in`, list values and the listed timestamp,
+    status, base-fare and ledger-subtotal names never or almost never appeared; booking.* is empty before
+    purchase, so only refund requests keep it. The schema is about a third of each request's input. Every
+    output of the lean grammar is still valid under the supplied one.
+    """
+    definitions = deepcopy(definitions)
+
+    def operator(branch):
+        return branch.get("properties", {}).get("op", {}).get("enum", [])
+
+    definitions["predicate"]["anyOf"] = [branch for branch in definitions["predicate"]["anyOf"]
+                                         if not {"in", "if"} & set(operator(branch))]
+    definitions["value"]["anyOf"] = [branch for branch in definitions["value"]["anyOf"]
+                                     if branch.get("type") != "array" and "if" not in operator(branch)]
+
+    def prune(node):
+        if isinstance(node, dict):
+            names = node.get("enum")
+            if names and all(isinstance(name, str) and "." in name for name in names):
+                node["enum"] = [name for name in names if not name.endswith(UNUSED_FIELDS) and name not in UNUSED_VARIABLES
+                                and (keep_booking or not name.startswith("booking."))]
+            for value in node.values():
+                prune(value)
+        elif isinstance(node, list):
+            for value in node:
+                prune(value)
+
+    prune(definitions)
+    return definitions
+
+
 def strict_object(properties):
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
@@ -638,7 +677,7 @@ FACT_NOTES = {
                   "or a backup sales cutoff. Use null for an unstated report time, delay or probability."),
 }
 EXPRESSION_NOTES = (
-    "Expressions use the schema's forms; if branches short-circuit; 'in' requires a list on the right; ordering "
+    "Expressions use the schema's forms; if branches short-circuit; ordering "
     "requires numbers. exists and minimum bind item to each pool object without changing outer candidate/booking; "
     "minimum returns the least value over matching items, else its default.\n"
     "candidate is the proposed offer or hold at purchase and the active booking when checking arrival; booking is "
@@ -832,7 +871,7 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
                                                  for key in fact_keys})
         schema = strict_object(properties)
         if expression_keys:
-            schema["$defs"] = deepcopy(full["$defs"])
+            schema["$defs"] = lean_definitions(full["$defs"], keep_booking="refund_groups" in expression_keys)
         response = api.json(settings, scoped_instructions(instructions, expression_keys, fact_keys),
                             scoped, schema, label)
         contract.update({key: response[key] for key in ("budget_limit", "arrival_deadline") if key in response})
