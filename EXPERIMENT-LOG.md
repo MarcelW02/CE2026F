@@ -369,6 +369,18 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
   stress_v6 targets these settings, plus unusual scenarios.
 - **Decision.** Keep.
 
+## stress_v6 — varied case settings and unusual scenarios (2026-11-23)
+
+- **Bank (17 cases, `tools/stress_builder_v6.py`):**
+  - **Settings:** transfer differing by mode (also with a road closure); mixed flexible, fee and locked fares; step-free not required; first booking due at minute 9 or 10; 6-minute holds; evidence type disruption-letter; a single seat sold at minute 7.
+  - **Unusual scenarios:** the preferred mode affordable only after a budget raise; a distracting message about the colleague; a deadline stated as terminal arrival; a per-ticket price cap besides the total; a weather report revised from 40 to 60 minutes; an amendment at minute 1; an interrupted reply plus an early amendment; a locked exposed flight under a forecast.
+- **Result.**
+
+  | Version | Success |
+  |---|---|
+  | Submitted `f70eb4e` | 12/17 (four first-service timing failures, plus the locked exposed flight) |
+  | `7b036f8` | **17/17 in both runs** |
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.
