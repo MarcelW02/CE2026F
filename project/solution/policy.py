@@ -15,10 +15,34 @@ import re
 from types import SimpleNamespace
 
 
+# The full call compiles every rule from unfamiliar text in one reply. At effort low, 25-30% of these replies
+# came back with no reasoning at all, and those carried the misreadings; at medium none did (0 of 128) and
+# every forced-full episode passed (61/61) for about 25% more per call. Scoped calls stay at the configured effort.
+FULL_CALL_EFFORT = "medium"
+
+
+def compact_full_request(instructions, payload, schema):
+    """The full fallback call with the scoped call's compact parts: on unfamiliar cases this call carries most cost.
+
+    Instructions cover exactly the schema's keys and facts (consent and waiver included), the grammar is the lean
+    one with booking.* kept for refund rules, and offers keep the fields a contract can reference.
+    """
+    if instructions != CONTRACT_INSTRUCTIONS + "\n" + PROJECT_PROMPT or "$defs" not in schema:
+        return instructions, payload, schema
+    properties = schema["properties"]
+    keys = [key for key in ("budget_limit", "arrival_deadline", "refund_groups") if key in properties]
+    fact_keys = [key for key in properties.get("facts", {}).get("properties", {}) if key in FACT_NOTES]
+    instructions = scoped_instructions(instructions, keys, fact_keys, complete=True)
+    schema = dict(schema, **{"$defs": lean_definitions(schema["$defs"], keep_booking=True)})
+    payload = dict(payload, offers=[{key: offer[key] for key in OFFER_KEYS if key in offer} for offer in payload["offers"]])
+    return instructions, payload, schema
+
+
 def interpret_with_consent_references(api, settings, instructions, payload, schema, label):
     observation = {key: payload["observation"][key]
                    for key in ("virtual_minute", "tier", "notices", "operational_sources")}
     payload = dict(payload, observation=observation)
+    instructions, payload, schema = compact_full_request(instructions, payload, schema)
     notices = payload["observation"]["notices"]
     # shortcut: alias the standard consent format, extend coverage if other formats cause copying errors.
     token_pattern = r"\bconsent-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b"
@@ -661,11 +685,12 @@ SCOPED_INTRO = (
     "You compile currently observed travel contract fields into the typed object required by the response schema. "
     "You do not grade, choose an offer, or infer future events. Interpret ordinary English scope, exceptions, "
     "amendments and inequalities exactly. Preserve unamended conditions. The current authoritative source versions "
-    "supersede earlier text only for their stated scope. A forecast is a possibility, never realized weather. "
-    "This request asks only for the keys in its schema; every other field is already compiled, and unrelated "
-    "documents and offers are omitted."
+    "supersede earlier text only for their stated scope. A forecast is a possibility, never realized weather."
 )
+SCOPE_NOTE = ("This request asks only for the keys in its schema; every other field is already compiled, and unrelated "
+              "documents and offers are omitted.")
 FACT_NOTES = {
+    "consent": "consent: the literal approval token for the lead outbound; consent covers the lead outbound only.",
     "preferred": "preferred: the preferred mode.",
     "requires_step_free": "requires_step_free: whether step-free access is required.",
     "avoid_carriers": "avoid_carriers: excluded carrier names. Ordinary access/carrier facts apply to the current trip.",
@@ -701,8 +726,11 @@ REFUND_RULES = (
 CEILING_RULE = "All monetary ceilings are total spending, unless the prose explicitly compares prices inside a condition."
 
 
-def scoped_instructions(instructions, keys, fact_keys):
-    """Instructions for only the requested keys; the strict schema already fixes the expression grammar."""
+def scoped_instructions(instructions, keys, fact_keys, complete=False):
+    """Instructions for only the requested keys; the strict schema already fixes the expression grammar.
+
+    complete=True serves the full fallback call, which asks for every key and fact itself.
+    """
     if instructions != CONTRACT_INSTRUCTIONS + "\n" + PROJECT_PROMPT:
         return instructions
     outputs, ceiling = CONTRACT_INSTRUCTIONS.split("\n\nOutput object keys:\n", 1)[1].split("\n\n")[:2]
@@ -710,7 +738,7 @@ def scoped_instructions(instructions, keys, fact_keys):
     lines = [key_lines[key] for key in keys]
     if fact_keys:
         lines.append("facts: " + " ".join(FACT_NOTES[key] for key in fact_keys))
-    parts = [SCOPED_INTRO, "Output object keys:\n" + "\n".join(lines)]
+    parts = [SCOPED_INTRO if complete else SCOPED_INTRO + " " + SCOPE_NOTE, "Output object keys:\n" + "\n".join(lines)]
     if "budget_limit" in keys:
         parts.append(ceiling)
     if keys:
@@ -718,7 +746,7 @@ def scoped_instructions(instructions, keys, fact_keys):
         rules += [REFUND_RULES] if "refund_groups" in keys else []
         rules += [CEILING_RULE] if "budget_limit" in keys else []
         parts += [EXPRESSION_NOTES, " ".join(rules)]
-    project = ["intro"] + (["waiver"] if "waiver" in fact_keys else []) + ["amendments"]
+    project = ["intro"] + [name for name in ("consent", "waiver") if name in fact_keys] + ["amendments"]
     project += ["exceptions"] if keys else []
     parts.append("\n".join(PROJECT_PARTS[name] for name in project))
     return "\n\n".join(parts)
@@ -1337,7 +1365,8 @@ def solve(world, api, config, route_fn):
                 result = read_spending_amendment(payload, previous_packet)
             if result is None:
                 result = (compile_partially(api, settings, instructions, payload, label, previous_packet)
-                          or interpret_with_consent_references(api, settings, instructions, payload, schema, label))
+                          or interpret_with_consent_references(api, dict(settings, effort=FULL_CALL_EFFORT),
+                                                               instructions, payload, schema, label))
                 if refunds := read_weather_refunds(payload):
                     result = dict(result, refund_groups=refunds)
             previous_packet = payload

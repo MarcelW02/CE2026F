@@ -323,6 +323,30 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
   Dev and team cases now cost about the allowance (projected total 100).
 - **Decision.** Keep.
 
+## Leaderboard of `f70eb4e` and Experiment L8 — compact full call at effort medium (2026-11-23)
+
+- **Leaderboard result for `f70eb4e`:** 89.14 (Louisa 91.04). Grading cost was $0.0914 against $0.0917, with 136 calls against 135, so the cost was unchanged. The scoped-path savings of L1–L3 therefore never reached the 90 non-Public cases. Their cost per call ($0.00067) matches a full fallback call (about $0.0007 locally), not a scoped one ($0.00042). The outcome drop (arrival −1.0, reliability −0.25, Basic −1.2) runs through code paths the version did not change, so it is most likely run-to-run variation in the full call.
+- **Forced-full-path diagnostic.** A copy of the solver with `compile_partially` returning None routes every call through the full fallback, as the hidden cases do. It was run on Dev and stress_v1–v3 (61 episodes, 128 calls).
+
+  | Full call | Success | Cost per episode | Zero-reasoning calls |
+  |---|---|---:|---:|
+  | Supplied instructions, low | 61/61 | $0.001416 | 25% |
+  | Compact (scoped instructions with consent, lean grammar, trimmed offers), low | 58/61 and 57/61 | $0.001224 | 26–30% |
+  | **Compact, medium** | **61/61 and 61/61** | $0.001536 | **0%** |
+
+  At effort low, a quarter of the full calls return no reasoning at all (against about 11% of scoped calls), and those carried the misreadings.
+- **Change.** `compact_full_request` gives the full call compact instructions (all keys and facts, including consent and waiver), the lean grammar with `booking.*` kept, and offers trimmed to `OFFER_KEYS`. `FULL_CALL_EFFORT = "medium"` applies to the full call only; scoped calls stay at the configured effort (low).
+- **Expected leaderboard effect.** Efficiency about −0.4. If reasoning-free misreadings explain even half of the 13 arrival and 10 reliability failures, outcome rises 2–4 points.
+- **stress_v5 (12 cases, `tools/stress_builder_v5.py`):**
+  - **Full-path triggers:** an `approval-…` token format, two approval tokens, an amendment at minute 4 (before the first interpretation), two fare documents, archived bulletin evidence.
+  - **Size:** 18–20 offers, long documents with distracting figures, 12 sources.
+  - **Rule types:** a locked cheapest fare, refunds by carrier, two forecast modes.
+
+  The approval format, the two tokens and the early amendment do reach the full path. Result: 10/12 with the real code and 10/12 forced full, with the same two deterministic planner failures:
+  - **12 sources:** five extra boot reads delay the first confirmation past minute 12.
+  - **Locked cheapest preferred flight:** booked first, so the minute-16 amendment cannot be met.
+- **Decision.** Keep the compact full call at medium. Fix the two stress_v5 planner failures next.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.
