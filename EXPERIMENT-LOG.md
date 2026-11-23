@@ -187,6 +187,24 @@ Experiments 13–15 used **$0.05450615 in estimated API spend**, within the $0.2
 - **Result.** Unseen-wording cost (Dev plus team) is $0.000472 per episode, 1.18× the allowance (efficiency about 8.5). Cumulative change from `443103b`: −29%.
 - **Decision.** Keep.
 
+## Experiment L3 — Ask Reactive updates only for amended fields, and bind stray refund items (2026-11-23)
+
+- **Baseline.** L2 (`4fd658c`). Every user update re-asked all three traveller facts, together with the traveller profile. Any topic word also triggered its field, even in "My spending authority … continue(s)". In recorded calls, the model returned those fields unchanged.
+- **Change 1: `update_topics`.** Updates are split into clauses (on punctuation, plus "but", "while" and similar). A clause asks for a field when it mentions that topic; clock times count as arrival. A clause that only restates a rule is skipped: it has a continuation word (continue, unchanged, remain, keep, retain), no digits, and no change word outside the continuation phrase. Traveller facts are asked when a clause mentions access, carriers or preference, or names a carrier from the offers or the avoid list, in the update or in a changed document. Documents whose authority changed are still always re-asked.
+- **Check.** I tested 27 update texts: those in Public, Dev and the team cases, the framework generator's templates, and 3 traps that pair a continuation word with a real change. No changed field is missed. One bug, a colon split inside "09:30", was found and fixed. The only extras are harmless over-asks.
+- **Change 2: `bind_refund_items`.** The model-path Public diagnostic had 2 of 100 refund groups use `item.mode`/`item.weather_exposed` outside a quantifier. The framework rejects that ("item is available only inside a quantifier"), and the episode fails at 10/90. Nothing binds `item` there, so in a refund rule it can only mean the cancelled ticket, and the solver now renames it to `booking.*`. Across 398 recorded refund groups, both faulty ones are repaired to the form used by the passing repeats, and the other 396 are unchanged. The initial prompt is identical between the L2 and L3 runs (0/100 vs 2/100), so this is random variation between runs, not caused by L3. A third diagnostic failure was a Basic quote rule ("min" instead of "add"), also random; there is no local repair for it.
+- **Live (final code).**
+
+  | Run | Success | Grading |
+  |---|---:|---:|
+  | Public, real solution | 60/60 (100/100), 0 calls | $0 |
+  | Dev | 9/9 | $0.00404 |
+  | Team cases | 5/5 | $0.00224 |
+
+  The model-path diagnostic of change 1 alone ran 57/60, the 3 failures described above. Reactive model-path cost did not move, because both Public updates genuinely amend budget and carriers. Team Reactive fell 15%, from $0.000656 to $0.000559 per episode.
+- **Result.** Unseen-wording cost is $0.000449 per episode (1.12× the allowance, efficiency about 8.9). Cumulative change from `443103b`: −33%.
+- **Decision.** Keep both.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.

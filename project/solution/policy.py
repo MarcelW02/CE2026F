@@ -414,6 +414,37 @@ NOTICE_TOPICS = (
     ("transfer", r"\btransfer"),
     ("waiver", r"\b(?:hotel|waiver|bulletin)"),
 )
+TRAVELER_TOPIC = (r"\b(?:carriers?|airlines?|operators?|step[- ]free|access\w*|wheelchair|prefer\w*|avoid\w*|"
+                  r"exclud\w*|permitted|no longer (?:use|fly|take|travel)|(?:cannot|can't|must not|may not) "
+                  r"(?:use|fly|take|travel)|rail|flying)\b")
+CLOCK_TOPIC = r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\bneeds? me\b"
+CONTINUES = re.compile(r"\b(?:continues?|unchanged|unaffected|remains?|stays?|stand|still appl(?:y|ies)|keep|retain|"
+                       r"(?:have|has|had) not (?:been )?changed|not changed|as (?:they|it) (?:was|were))\b", re.IGNORECASE)
+CHANGE_WORD = re.compile(r"\b(?:now|new|newly|replac\w*|no longer|only|instead|mov\w*|chang\w*|reduc\w*|rais\w*|"
+                         r"increas\w*|lower\w*|extend\w*|withdraw\w*|revis\w*|updat\w*|amend\w*|except\w*)\b",
+                         re.IGNORECASE)
+CLAUSE_SPLIT = re.compile(r"[;!?]|[.:](?!\d)|\b(?:but|while|however|although|except)\b", re.IGNORECASE)
+
+
+def restates_only(clause):
+    """A clause that says a rule continues, with no figure and no change word outside that statement."""
+    return bool(CONTINUES.search(clause)) and not re.search(r"\d", clause) \
+        and not CHANGE_WORD.search(CONTINUES.sub(" ", clause))
+
+
+def update_topics(text, carriers):
+    """Contract keys (and 'traveler') that some clause of an update may amend."""
+    topics = set()
+    patterns = (*NOTICE_TOPICS, ("arrival_deadline", CLOCK_TOPIC), ("traveler", TRAVELER_TOPIC))
+    for clause in CLAUSE_SPLIT.split(text):
+        if any(re.search(rf"\b{re.escape(carrier)}\b", clause) for carrier in carriers):
+            topics.add("traveler")
+        if restates_only(clause):
+            continue
+        topics.update(key for key, pattern in patterns if re.search(pattern, clause, re.IGNORECASE))
+    return topics
+
+
 OFFER_KEYS = ("id", "mode", "price", "carrier", "step_free", "arrival_minute", "weather_exposed",
               "available_from", "expires_at", "hold_fee_usd", "change_policy", "cancel_fee_usd")
 
@@ -697,8 +728,14 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
         if updates:
             if not changed:
                 return None
-            asks.update(TRAVELER_FACTS)
-            asks.update(key for key, pattern in NOTICE_TOPICS if re.search(pattern, updates, re.IGNORECASE))
+            carriers = {offer["carrier"] for offer in offers if offer.get("carrier")}
+            carriers |= set(previous["facts"].get("avoid_carriers") or [])
+            topics = update_topics(updates, carriers)
+            for source_id in changed - {"weather-forecast"}:
+                if source_id in documents and "traveler" in update_topics(documents[source_id]["text"], carriers):
+                    topics.add("traveler")
+            asks.update(TRAVELER_FACTS if "traveler" in topics else ())
+            asks.update(topics - {"traveler"})
         if any(notice["kind"] != "user_update" for notice in new) or "weather-forecast" in changed:
             asks.update(WEATHER_FACTS)
         for key, source_id in (("budget_limit", budget_id), ("arrival_deadline", arrival_id)):
@@ -798,6 +835,31 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
             "refund_groups": list(groups.values()), "facts": facts}
 
 
+def bind_free_items(expression, inside=False):
+    """Rename item.* outside exists/minimum to booking.*.
+
+    No pool object is bound there, so in a refund rule the only possible ticket is the cancelled booking.
+    """
+    if isinstance(expression, list):
+        return [bind_free_items(value, inside) for value in expression]
+    if not isinstance(expression, dict):
+        return expression
+    if expression.get("op") in ("exists", "minimum"):
+        return {key: bind_free_items(value, inside or key in ("where", "value")) for key, value in expression.items()}
+    variable = expression.get("var")
+    if not inside and set(expression) == {"var"} and isinstance(variable, str) and variable.startswith("item."):
+        return {"var": "booking." + variable[len("item."):]}
+    return {key: bind_free_items(value, inside) for key, value in expression.items()}
+
+
+def bind_refund_items(result):
+    if not isinstance(result, dict) or not isinstance(result.get("refund_groups"), list):
+        return result
+    groups = [dict(group, retained=bind_free_items(group["retained"])) if isinstance(group, dict) and "retained" in group
+              else group for group in result["refund_groups"]]
+    return dict(result, refund_groups=groups)
+
+
 def choose_offer_with_decisions(observation, trip_state, offers, api):
     """Optional paid proposal; solve does not call this helper by default.
 
@@ -862,7 +924,7 @@ def solve(world, api, config, route_fn):
                 if refunds := read_weather_refunds(payload):
                     result = dict(result, refund_groups=refunds)
             previous_packet = payload
-            return result
+            return bind_refund_items(result)
 
         return supplied_agent(world, SimpleNamespace(json=interpret), config, route_fn)
     return supplied_agent(world, api, config, route_fn)
