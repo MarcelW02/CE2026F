@@ -800,8 +800,10 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
         changed = {source_id for source_id in set(documents) | set(old_documents)
                    if documents.get(source_id) != old_documents.get(source_id)}
         old_sources = previous_packet["observation"]["operational_sources"]
+        # A reference source first read after boot is newly seen context, not an amendment; a revised one is.
+        changed -= {source_id for source_id in changed - known_ids if source_id not in old_documents}
         if changed - known_ids:
-            return None  # a changed source of unknown scope: interpret everything
+            return None  # a revised source of unknown scope: interpret everything
         updates = " ".join(notice["text"] for notice in new if notice["kind"] == "user_update")
         if updates:
             carriers = {offer["carrier"] for offer in offers if offer.get("carrier")}
@@ -1048,9 +1050,20 @@ class TimelyController(Controller):
         self.claimed.add(waiver_key(waiver))
         return action("claim", topic=waiver["topic"], code=waiver["code"], version=waiver["version"])
 
+    def pending_reads(self, observation, everything=False):
+        """Reads for revised sources already held, plus unread sources the contract may depend on (or all)."""
+        needed = None if everything else self.boot_sources(observation)
+        return [action("read", id=source["id"]) for source in observation["source_catalog"]
+                if (source["id"] in self.documents and self.documents[source["id"]]["version"] != source["version"])
+                or (source["id"] not in self.documents and (needed is None or source["id"] in needed))]
+
     def refresh(self, initial=False):
         if not initial:
-            return super().refresh()
+            # As supplied (search alongside source reads, then interpret), but unlinked reference material is left
+            # for idle time instead of delaying the reaction to a notice.
+            self.batch([action("search")] + self.pending_reads(self.world.observe()))
+            self.interpret_observed(boot=True)
+            return
         # As supplied: hotel-terms first, because it links the bulletin into the catalog.
         observation = self.world.observe()
         first = [action("search")]
@@ -1060,10 +1073,12 @@ class TimelyController(Controller):
         if spend_source != "hotel-terms":
             first.append(action("read", id=spend_source))
         self.batch(first)
-        # Then the bulletin leads the next round, so the round after it can carry the claim.
+        # Then the bulletin leads the next round, so the round after it can carry the claim. Only sources the
+        # contract can depend on are read before the first booking (see boot_sources); others follow later.
         observation = self.world.observe()
         pending = sorted((action("read", id=source["id"]) for source in observation["source_catalog"]
-                          if source["id"] not in self.documents or self.documents[source["id"]]["version"] != source["version"]),
+                          if source["id"] in self.boot_sources(observation)
+                          and (source["id"] not in self.documents or self.documents[source["id"]]["version"] != source["version"])),
                          key=lambda row: row["arguments"]["id"] != "hotel-bulletin")
         if pending:
             self.batch(pending[:3])
@@ -1077,14 +1092,30 @@ class TimelyController(Controller):
             rest.insert(0, self.claim(waiver))
         if rest:
             self.batch(rest)
-        self.interpret_observed()
+        self.interpret_observed(boot=True)
 
-    def interpret_observed(self):
+    def boot_sources(self, observation):
+        """Sources the first interpretation needs: the fixed trip sources, the operational and fare authorities,
+        anything they link, and any catalog ID named in the request or in a source already read.
+
+        Every catalog source is read before the supplied first booking, so extra reference material (agendas,
+        policies, unrelated notes) delays it past the minute-12 deadline. Such sources are read at the next refresh.
+        """
+        catalog = {source["id"] for source in observation["source_catalog"]}
+        needed = {"hotel-terms", "hotel-bulletin", "traveler-profile", "transport-guide", "weather-forecast"}
+        needed |= {reference["id"] for reference in observation["operational_sources"].values()}
+        needed |= {(offer.get("refund_contract_source") or {}).get("id") for offer in self.offers.values()}
+        texts = [notice["text"] for notice in observation["notices"]]
+        for document in self.documents.values():
+            needed |= set(document.get("related", []))
+            texts.append(document["text"])
+        needed |= {identifier for identifier in catalog if any(re.search(rf"\b{re.escape(identifier)}\b", text) for text in texts)}
+        return needed & catalog
+
+    def interpret_observed(self, boot=False):
         """The supplied refresh after its first batch: read remaining changes, interpret, bind purchased terms."""
         while not self.world.finished:
-            observation = self.world.observe()
-            pending = [action("read", id=source["id"]) for source in observation["source_catalog"]
-                       if source["id"] not in self.documents or self.documents[source["id"]]["version"] != source["version"]]
+            pending = self.pending_reads(self.world.observe(), everything=not boot)
             if not pending:
                 break
             self.batch(pending)
@@ -1204,6 +1235,21 @@ class TimelyController(Controller):
             return True
         return False
 
+    def choose_plan(self, observation, booking):
+        """The supplied choice, but a first booking in a tier with later changes avoids a locked fare.
+
+        A locked ticket (refund expression null) cannot be cancelled, so any later amendment that makes it unusable
+        cannot be repaired. Among first bookings of equal preference, a cancellable fare is taken before price.
+        """
+        if booking or observation.get("tier") == "basic":
+            return super().choose_plan(observation, booking)
+        terms = self.program["refund_terms"]
+        plans = [plan for offer in self.candidates(observation)
+                 if (plan := self.purchase_plan(observation, offer, None)) is not None]
+        plans.sort(key=lambda plan: (not plan["preferred"], plan["option"]["id"] in terms and terms[plan["option"]["id"]] is None,
+                                     plan["expense"], plan["loss"], plan["option"]["arrival_minute"]))
+        return plans[0] if plans else None
+
     def claim_pending_waiver(self, first=False):
         """Claim the current interpreted evidence once; on the first pass, hold the planned booking alongside."""
         observation = self.world.observe()
@@ -1264,6 +1310,11 @@ class TimelyController(Controller):
                 when = forecast.get("at")
                 if type(when) in (int, float) and when > self.world.now:
                     next_time = min(next_time, when)
+            idle_reads = [row for row in self.pending_reads(observation, everything=True)
+                          if row["arguments"]["id"] not in self.documents][:3]
+            if idle_reads and next_time - self.world.now >= 2:
+                self.batch(idle_reads)  # a read takes the same two minutes as the wait it replaces
+                continue
             self.call("wait", minutes=max(1, min(36, int(next_time - self.world.now))))
         if not self.world.finished:
             self.call("finish")

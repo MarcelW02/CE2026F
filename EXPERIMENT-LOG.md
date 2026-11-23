@@ -347,6 +347,28 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
   - **Locked cheapest preferred flight:** booked first, so the minute-16 amendment cannot be met.
 - **Decision.** Keep the compact full call at medium. Fix the two stress_v5 planner failures next.
 
+## Experiment L9 — Read only contract sources before acting, and keep first bookings cancellable (2026-11-23)
+
+- **Many sources (stress5-09).**
+  - *Problem:* the supplied boot reads every catalog source before the first booking, and after a notice the supplied refresh reads all unread sources before interpreting. Five unrelated reference documents pushed the first confirmation past minute 12. Once they were deferred, they delayed the reaction to the minute-16 amendment past a refund cutoff instead.
+  - *Fix:* `boot_sources` gives the sources a contract can depend on: the fixed trip sources, the operational and fare authorities, their `related` links, and any catalog ID named in a notice or in a source already read. Before an interpretation, only those (plus revised sources already held) are read. Other sources are read in idle time, replacing a wait of at least 2 minutes, which costs no virtual time. A source first read after boot counts as new context in `compile_partially`, not as an amendment.
+- **Locked fare (stress5-10).**
+  - *Problem:* the cheapest preferred flight was locked (refund null). The planner booked it, so the minute-16 amendment could not be met.
+  - *Fix:* the first booking in Reactive and Forecast sorts by preference, then cancellability, then price. Basic, which has no later changes, is unchanged.
+- **Result (two full runs).** Public 100/100. Dev, team and stress_v1–v5: **87/87 in both runs (174/174)**, at $0.000522 and $0.000528 per episode (unchanged).
+- **Coverage audit of all 117 local cases.** Structural settings barely vary:
+  - transfer equal for all modes (117/117);
+  - fares 729 fee, 1 locked, 0 flexible;
+  - step-free required in 116;
+  - first-booking deadline always 12;
+  - hold duration 16 in 116;
+  - exposure mostly flight;
+  - evidence type always cancel-reference;
+  - 6 offers in 113.
+
+  stress_v6 targets these settings, plus unusual scenarios.
+- **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.
