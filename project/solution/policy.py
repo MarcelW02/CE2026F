@@ -432,7 +432,7 @@ def read_weather_refunds(payload):
 CONSENT_TOKEN = r"\bconsent-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b"
 TRAVELER_FACTS = ("preferred", "requires_step_free", "avoid_carriers")
 WEATHER_FACTS = ("weather", "forecasts")
-FACT_ORDER = (*TRAVELER_FACTS, "transfer", "waiver", *WEATHER_FACTS)
+FACT_ORDER = ("consent", *TRAVELER_FACTS, "transfer", "waiver", *WEATHER_FACTS)
 UPDATE_KINDS = {"user_update", "forecast_update", "weather_update"}
 NEUTRAL_KINDS = {"provider_notice", "stock_update", "sellout"}  # inventory and procedure notices: no contract terms
 SOURCE_KINDS = {"transport_update", "document_update"}  # the changed transport-guide or hotel-bulletin carries the terms
@@ -752,6 +752,32 @@ def scoped_instructions(instructions, keys, fact_keys, complete=False):
     return "\n\n".join(parts)
 
 
+def early_notice_asks(notices, carriers):
+    """Fields that notices received before the first interpretation may have amended.
+
+    Sources revised by these notices are already read in their current version, so local readers see them; what
+    they cannot see is a change stated only in a message, so user updates are routed by topic (all rules when no
+    topic is recognisable), and weather, transfer and waiver notices ask their own facts.
+    """
+    asks = set()
+    updates = " ".join(notice["text"] for notice in notices if notice["kind"] == "user_update")
+    if updates:
+        topics = update_topics(updates, carriers) | {"traveler"}
+        if topics == {"traveler"}:
+            topics |= {"budget_limit", "arrival_deadline"}
+        asks |= set(TRAVELER_FACTS) | (topics - {"traveler"})
+    kinds = {notice["kind"] for notice in notices}
+    if kinds & WEATHER_KINDS:
+        asks |= set(WEATHER_FACTS)
+    if "transport_update" in kinds:
+        asks.add("transfer")
+    if "document_update" in kinds:
+        asks.add("waiver")
+    if any(re.search(CONSENT_TOKEN, notice["text"]) for notice in notices):
+        asks.add("consent")
+    return asks
+
+
 def compile_partially(api, settings, instructions, payload, label, previous_packet):
     """Compile recognized or unchanged fields locally and ask the model only for the rest."""
     notices = payload["observation"]["notices"]
@@ -772,30 +798,35 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
               if set(documents.get(source_id, {}).get("related", [])) & extra_ids}
     asks, refunds = set(), {}
     contract = {}
+    accepted = UPDATE_KINDS | NEUTRAL_KINDS | SOURCE_KINDS
+    carriers = {offer["carrier"] for offer in offers if offer.get("carrier")}
     if previous is None:
-        if len(notices) != 1 or notices[0]["kind"] != "initial_request":
-            return None
-        tokens = set(re.findall(CONSENT_TOKEN, notices[0]["text"]))
-        if len(tokens) != 1:
+        if not notices or notices[0]["kind"] != "initial_request" or any(n["kind"] not in accepted for n in notices[1:]):
             return None
         facts, asks = read_local_facts(notices[0]["text"], documents)
-        facts["consent"] = tokens.pop()
+        tokens = set(re.findall(CONSENT_TOKEN, notices[0]["text"]))
+        if len(tokens) == 1:
+            facts["consent"] = tokens.pop()
+        else:
+            asks.add("consent")  # another approval format, or several tokens: the model picks the lead's approval
         for key, source_id, reader in (("budget_limit", budget_id, read_spending_limit),
                                        ("arrival_deadline", arrival_id, read_arrival)):
             value = reader(documents[source_id]["text"]) if source_id in documents and key not in linked else None
             if value is None:
                 asks.add(key)
             contract[key] = value
+        # Notices that arrived before this first interpretation are read as updates in the same scoped call.
+        asks |= early_notice_asks(notices[1:], carriers)
         pending_offers = offers
     else:
         if previous_packet is None or "refund_terms" not in previous:
             return None
         old_notices = previous_packet["observation"]["notices"]
         new = notices[len(old_notices):]
-        accepted = UPDATE_KINDS | NEUTRAL_KINDS | SOURCE_KINDS
-        if notices[:len(old_notices)] != old_notices or any(
-                notice["kind"] not in accepted or re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
+        if notices[:len(old_notices)] != old_notices or any(notice["kind"] not in accepted for notice in new):
             return None
+        if any(re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
+            asks.add("consent")  # a notice naming an approval token: recheck which approval applies
         old_documents = {source["id"]: source for source in previous_packet["documents"]}
         changed = {source_id for source_id in set(documents) | set(old_documents)
                    if documents.get(source_id) != old_documents.get(source_id)}
@@ -806,7 +837,6 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
             return None  # a revised source of unknown scope: interpret everything
         updates = " ".join(notice["text"] for notice in new if notice["kind"] == "user_update")
         if updates:
-            carriers = {offer["carrier"] for offer in offers if offer.get("carrier")}
             carriers |= set(previous["facts"].get("avoid_carriers") or [])
             topics = update_topics(updates, carriers)
             for source_id in changed - {"weather-forecast"}:
@@ -906,6 +936,11 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
                             scoped, schema, label)
         contract.update({key: response[key] for key in ("budget_limit", "arrival_deadline") if key in response})
         facts.update(response.get("facts", {}))
+        if "consent" in fact_keys:
+            # The approval must be copied literally from a notice; anything else goes to the full interpreter.
+            consent = str(facts.get("consent") or "").strip()
+            if not consent or not any(re.search(rf"(?<![\w-]){re.escape(consent)}(?![\w-])", notice["text"]) for notice in notices):
+                return None
         for group in response.get("refund_groups", []):
             for identifier in group["offer_ids"]:
                 if identifier in refunds or identifier not in pending_ids:
@@ -956,6 +991,24 @@ def is_liveness_test(expression):
     return (expression.get("op") in ("eq", "ne", "in") and json.dumps({"var": "item.status"}) in sides)
 
 
+def says_expired(expression):
+    """item.expires_at < / <= state.now (or the mirrored form): a hold that has already expired."""
+    if not isinstance(expression, dict) or expression.get("op") not in ("lt", "le", "gt", "ge"):
+        return False
+    left, right = json.dumps(expression.get("left")), json.dumps(expression.get("right"))
+    expires, now = json.dumps({"var": "item.expires_at"}), json.dumps({"var": "state.now"})
+    return (expression["op"] in ("lt", "le") and (left, right) == (expires, now)) or (
+        expression["op"] in ("gt", "ge") and (left, right) == (now, expires))
+
+
+def contains(expression, predicate):
+    if predicate(expression):
+        return True
+    if isinstance(expression, dict):
+        return any(contains(value, predicate) for value in expression.values())
+    return isinstance(expression, list) and any(contains(value, predicate) for value in expression)
+
+
 def price_minimums(expression, in_holds=False):
     """Normalize two degenerate quantifier forms.
 
@@ -969,6 +1022,13 @@ def price_minimums(expression, in_holds=False):
         return expression
     if in_holds and is_liveness_test(expression):
         return True
+    if (expression.get("op") == "if" and contains(expression.get("when"), says_expired)
+            and type(expression.get("then")) in (int, float) and type(expression.get("else")) in (int, float)
+            and expression["then"] > expression["else"]):
+        # An "expired hold" test whose branch retains more than the alternative: the model inverted both the test
+        # and the branches. Holding a replacement never raises retention, so repairing only the test would invert
+        # the rule; this condition is left as written.
+        return {key: (value if key == "when" else price_minimums(value, in_holds)) for key, value in expression.items()}
     pool_holds = expression.get("op") in ("exists", "minimum") and expression.get("pool") == "holds"
     result = {key: price_minimums(value, pool_holds if key in ("where", "value") else in_holds)
               for key, value in expression.items()}

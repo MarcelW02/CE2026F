@@ -381,6 +381,20 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
   | Submitted `f70eb4e` | 12/17 (four first-service timing failures, plus the locked exposed flight) |
   | `7b036f8` | **17/17 in both runs** |
 
+## Experiment L10 — Keep the known full-path triggers in the scoped path (2026-11-23)
+
+- **Motivation.** Hidden cases reach the full interpreter, which now costs about twice a scoped call. stress_v5 confirmed three triggers: an approval token not in `consent-…` form, several approval tokens, and a notice before the first interpretation.
+- **Change in `compile_partially`.**
+  - When the request holds no single `consent-…` token, or a later notice names one, `consent` becomes a scoped fact. The reply must appear literally in a notice, otherwise the solver falls back to the full call.
+  - Notices received before the first interpretation are read as updates in the same scoped call (`early_notice_asks`). User updates are routed by topic, or every rule when no topic is recognisable. Weather or forecast notices ask the weather facts, transport updates ask the transfer, and document updates ask the waiver.
+- **Repair refinement.** An `if` whose condition tests for an expired hold and whose then-branch retains more than its else-branch had both the test and the branches inverted by the model. Repairing only the test inverted the rule (stress6-05, run b), so such a condition is now left as written. Holding a replacement never raises retention. 2,604 recorded outputs were checked: none becomes invalid.
+- **Result (two full runs, before the repair refinement).** Full calls fell from 6/140 and 2/25 to **0**. Cost per episode: v1–v5 $0.000500 (−4%), v6 $0.000425 (−10%). Success was 86/87 and 87/87 on v1–v5, and 17/17 and 16/17 on v6:
+  - stress2-16: a random misreading (`candidate.weather_exposed` for `candidate.mode == coach`) in an unchanged call;
+  - stress6-05: the inverted-rule repair, fixed above.
+
+  After the refinement: Public 100/100, stress_v3 15/15, stress_v6 17/17.
+- **Decision.** Keep. Whether hidden cases hit these triggers is only visible on the leaderboard.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.
