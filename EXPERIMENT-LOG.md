@@ -254,6 +254,29 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
 - **Remaining risk: zero-reasoning calls.** At effort low, about 11% of calls return 0 reasoning tokens. Episodes with such a call failed 14% of the time (14/102), against 5% otherwise (27/548). Every random misreading in L4's runs came from one. Repairs cover the recurring structural forms; plain value errors (610 for 09:50, 145 for a conditional ceiling) remain.
 - **Decision.** Keep.
 
+## Experiment L5 — More planner rounds and no full interpretations for non-contract events (2026-11-23)
+
+- **MAX_DECISIONS 12 → 30** (no API cost). Reactive and Forecast stress episodes already used up to 10 of the 12 planner rounds. One more event or rebooking would end the loop before the minute-28 handoff.
+- **`compile_partially` accepts more update shapes** instead of returning None, which falls back to the full combined interpreter at about $0.0007 per call. In the L4 runs, 14 such calls made up about 21% of cost.
+  - **No call** for provider notices, stock warnings and sellouts: no contract terms, so the previous interpretation is reused.
+  - **Scoped calls:** `transfer` for a `transport_update`, `waiver` for a `document_update`.
+  - **Extra documents** are sent as context with any expression request. An authority that links one is always interpreted, never read locally.
+  - **A message-only user update** gets a scoped call: traveller facts always, plus the recognised topics, or every rule when no topic is recognisable.
+  - **Weather facts** are re-asked only for forecast or weather events.
+  - A changed document of unknown scope still uses the full call.
+
+| Bank | L4 (`93f7ddf`) | L5 |
+|---|---|---|
+| Public | 100/100 | 100/100, 0 calls |
+| Dev | 9/9 | 9/9 |
+| Team cases | 5/5 | 5/5 |
+| stress_v1 | 17/19 | 19/19, −7% cost |
+| stress_v2 | 18/18 | 18/18 |
+| stress_v3 | 15/15 | 15/15, −32% cost |
+| All 66 model-path episodes | $0.000636 per episode, 14 full calls | **$0.000568 per episode (−11%), 3 full calls** |
+
+- **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.

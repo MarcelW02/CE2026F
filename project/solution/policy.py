@@ -410,6 +410,9 @@ TRAVELER_FACTS = ("preferred", "requires_step_free", "avoid_carriers")
 WEATHER_FACTS = ("weather", "forecasts")
 FACT_ORDER = (*TRAVELER_FACTS, "transfer", "waiver", *WEATHER_FACTS)
 UPDATE_KINDS = {"user_update", "forecast_update", "weather_update"}
+NEUTRAL_KINDS = {"provider_notice", "stock_update", "sellout"}  # inventory and procedure notices: no contract terms
+SOURCE_KINDS = {"transport_update", "document_update"}  # the changed transport-guide or hotel-bulletin carries the terms
+WEATHER_KINDS = {"forecast_update", "weather_update"}
 NOTICE_TOPICS = (
     ("budget_limit", r"\b(?:spend|allowance|ceiling|budget|USD|supplement|payment)"),
     ("arrival_deadline", r"\b(?:arriv|deadline|appointment|meeting|registration|check-in|client by)"),
@@ -693,8 +696,13 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
     fare_ids = {(offer.get("refund_contract_source") or {}).get("id") for offer in offers}
     known_ids = {budget_id, arrival_id, "traveler-profile", "transport-guide", "hotel-terms", "hotel-bulletin",
                  "weather-forecast"} | fare_ids
-    if not offers or None in fare_ids or not set(documents) <= known_ids:
+    if not offers or None in fare_ids:
         return None
+    # Extra sources (an agenda, a linked note) are context: sent along with any expression request, and an
+    # authority that links one is always interpreted, because the local readers see only the authority itself.
+    extra_ids = set(documents) - known_ids
+    linked = {key for key, source_id in (("budget_limit", budget_id), ("arrival_deadline", arrival_id))
+              if set(documents.get(source_id, {}).get("related", [])) & extra_ids}
     asks, refunds = set(), {}
     contract = {}
     if previous is None:
@@ -707,7 +715,7 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
         facts["consent"] = tokens.pop()
         for key, source_id, reader in (("budget_limit", budget_id, read_spending_limit),
                                        ("arrival_deadline", arrival_id, read_arrival)):
-            value = reader(documents[source_id]["text"]) if source_id in documents else None
+            value = reader(documents[source_id]["text"]) if source_id in documents and key not in linked else None
             if value is None:
                 asks.add(key)
             contract[key] = value
@@ -717,28 +725,33 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
             return None
         old_notices = previous_packet["observation"]["notices"]
         new = notices[len(old_notices):]
+        accepted = UPDATE_KINDS | NEUTRAL_KINDS | SOURCE_KINDS
         if notices[:len(old_notices)] != old_notices or any(
-                notice["kind"] not in UPDATE_KINDS or re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
+                notice["kind"] not in accepted or re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
             return None
         old_documents = {source["id"]: source for source in previous_packet["documents"]}
         changed = {source_id for source_id in set(documents) | set(old_documents)
                    if documents.get(source_id) != old_documents.get(source_id)}
         old_sources = previous_packet["observation"]["operational_sources"]
         if changed - known_ids:
-            return None
+            return None  # a changed source of unknown scope: interpret everything
         updates = " ".join(notice["text"] for notice in new if notice["kind"] == "user_update")
         if updates:
-            if not changed:
-                return None
             carriers = {offer["carrier"] for offer in offers if offer.get("carrier")}
             carriers |= set(previous["facts"].get("avoid_carriers") or [])
             topics = update_topics(updates, carriers)
             for source_id in changed - {"weather-forecast"}:
                 if source_id in documents and "traveler" in update_topics(documents[source_id]["text"], carriers):
                     topics.add("traveler")
+            if not changed:
+                # The message itself carries the change: always recheck traveller facts, and every rule
+                # when no topic is recognisable.
+                topics.add("traveler")
+                if topics == {"traveler"}:
+                    topics |= {"budget_limit", "arrival_deadline"}
             asks.update(TRAVELER_FACTS if "traveler" in topics else ())
             asks.update(topics - {"traveler"})
-        if any(notice["kind"] != "user_update" for notice in new) or "weather-forecast" in changed:
+        if any(notice["kind"] in WEATHER_KINDS for notice in new) or "weather-forecast" in changed:
             asks.update(WEATHER_FACTS)
         for key, source_id in (("budget_limit", budget_id), ("arrival_deadline", arrival_id)):
             if source_id in changed or sources[key] != old_sources.get(key):
@@ -790,6 +803,8 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
             wanted |= {"hotel-terms", "hotel-bulletin"}
         if asks & set(WEATHER_FACTS):
             wanted.add("weather-forecast")
+        if asks & {"budget_limit", "arrival_deadline"}:
+            wanted |= extra_ids
         scoped_documents = [deepcopy(source) for source in payload["documents"]
                             if source["id"] in wanted and source["id"] not in pending]
         for source_id, identifiers in pending.items():
