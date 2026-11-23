@@ -418,6 +418,81 @@ OFFER_KEYS = ("id", "mode", "price", "carrier", "step_free", "arrival_minute", "
               "available_from", "expires_at", "hold_fee_usd", "change_policy", "cancel_fee_usd")
 
 
+WEATHER_EVENT_KINDS = {"forecast_update", "weather_update"}
+STAMP_NUMBER = re.compile(r"(?:\bminute|\bversion)\s+$", re.IGNORECASE)
+DELAY_PATTERNS = (re.compile(r"\b(\d+)[- ]minutes?\s+delay", re.IGNORECASE),
+                  re.compile(r"\bdelay(?:ed)?\s+(?:of\s+|by\s+)?(\d+)\s+minutes?\b", re.IGNORECASE))
+ON_TIME = re.compile(r"\bon time\b", re.IGNORECASE)
+HEDGE = re.compile(r"\b(?:possible|possibly|may|might|could|estimated?|uncertain|unresolved|expected|likely|chance|"
+                   r"risk|preliminary|provisional|so far|further|next report|at least|up to|forecasts? (?:a|an))\b|%",
+                   re.IGNORECASE)
+REALIZED = re.compile(r"\b(?:actual|actually|observed|realized|realised|final operating|operating (?:result|outcome|report)|"
+                      r"confirms?|confirmed)\b", re.IGNORECASE)
+STILL_OPEN = re.compile(r"\b(?:remains?|still|is still)\s+(?:uncertain|unresolved|open|possible)\b", re.IGNORECASE)
+SETTLED = re.compile(r"\b(?:did not|has not|have not|not occur|on time|resolved|realized|realised|confirms?|confirmed|"
+                     r"delayed by|observed|cancelled|canceled)\b", re.IGNORECASE)
+
+
+def mentioned_modes(texts):
+    return {mode for mode in ("flight", "train", "coach")
+            for text in texts if re.search(rf"\b{mode}(?:e?s)?\b", text, re.IGNORECASE)}
+
+
+def free_numbers(text):
+    """Numbers that are neither clock stamps (minute N) nor document versions."""
+    return [(match.start(), int(match[0])) for match in re.finditer(r"\d+", text)
+            if not STAMP_NUMBER.search(text[:match.start()])]
+
+
+def unversioned_numbers(text):
+    return [int(match[0]) for match in re.finditer(r"\d+", text)
+            if not re.search(r"\bversion\s+$", text[:match.start()], re.IGNORECASE)]
+
+
+def reported_delay(text):
+    """The single realized delay a report states, or None when any figure is unexplained."""
+    delays = {}
+    for pattern in DELAY_PATTERNS:
+        for match in pattern.finditer(text):
+            delays[match.start(1)] = int(match[1])
+    if any(position not in delays for position, _ in free_numbers(text)):
+        return None
+    values = set(delays.values()) | ({0} if ON_TIME.search(text) else set())
+    return values.pop() if len(values) == 1 else None
+
+
+def read_weather_event(new_notices, forecast, earlier_forecast, facts):
+    """Read a pure forecast or operating update locally; None defers it to the interpreter.
+
+    Two forms are supported in any wording: a forecast that stays open with no new figure,
+    and one realized delay for a single forecast mode. Anything else goes to the model.
+    """
+    if not new_notices or any(notice["kind"] not in WEATHER_EVENT_KINDS for notice in new_notices):
+        return None
+    announced = {row["mode"] for row in facts.get("forecasts") or []}
+    texts = [notice["text"] for notice in new_notices]
+    if forecast is not None and forecast != earlier_forecast:
+        texts.append(forecast["text"])
+    modes = mentioned_modes(texts)
+    if not announced or not modes <= announced:
+        return None
+    joined = " ".join(texts)
+    if STILL_OPEN.search(joined) and not SETTLED.search(joined):
+        # An open forecast may restate earlier figures, but any new number could be a changed estimate or report time.
+        known = set(unversioned_numbers(earlier_forecast["text"])) if earlier_forecast else set()
+        if all(value in known for text in texts for value in unversioned_numbers(text)):
+            return {"weather": deepcopy(facts["weather"]), "forecasts": deepcopy(facts["forecasts"])}
+        return None
+    if len(modes) != 1 or HEDGE.search(joined) or not REALIZED.search(joined):
+        return None
+    delays = {reported_delay(text) for text in texts}
+    if None in delays or len(delays) != 1:
+        return None
+    mode = modes.pop()
+    weather = dict(facts["weather"], **{mode: delays.pop()})
+    return {"weather": weather, "forecasts": [deepcopy(row) for row in facts["forecasts"] if row["mode"] != mode]}
+
+
 def strict_object(properties):
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
@@ -637,6 +712,12 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
         if changed & {"hotel-terms", "hotel-bulletin"}:
             asks.add("waiver")
         facts = deepcopy(previous["facts"])
+        if asks & set(WEATHER_FACTS) and changed <= {"weather-forecast"}:
+            weather = read_weather_event(new, documents.get("weather-forecast"),
+                                         old_documents.get("weather-forecast"), facts)
+            if weather is not None:
+                facts.update(weather)
+                asks -= set(WEATHER_FACTS)
         old_references = {offer["id"]: offer.get("refund_contract_source") for offer in previous_packet["offers"]}
         pending_offers = []
         for offer in offers:

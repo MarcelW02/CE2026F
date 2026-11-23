@@ -165,6 +165,28 @@ Experiments 13–15 used **$0.05450615 in estimated API spend**, within the $0.2
 - **Result.** Unseen-wording cost fell to $0.000567 per episode (1.41× the allowance, efficiency about 7.1, up from 6.0), with no outcome loss in 74 episodes. Output tokens, which include reasoning, did not change and are now 32–39% of cost.
 - **Decision.** Keep.
 
+## Experiment L2 — Read forecast and operating updates locally (2026-11-23)
+
+- **Baseline.** L1 (`ee2bcba`). Each Forecast episode makes two weather-only calls: one when the forecast is still open, one when the outcome is reported. These are about 35% of Forecast cost.
+- **Change.** `read_weather_event` handles an update made only of forecast/weather notices, with the weather forecast as the only changed document, without the model. Two forms are recognized, in any wording:
+  - **Still open:** an uncertainty marker, no settled-outcome words, and no number (minute stamps included) that the earlier forecast did not already contain. The facts are kept.
+  - **Resolved:** one announced mode, a realized-outcome marker, no hedge words, and a single delay value. Every free number in each text must be explained by the delay pattern, and the notice and document must agree. The reader sets `weather[mode]` and removes that mode's forecast.
+
+  Anything else goes to the model as before.
+- **Offline.** Replaying all 56 recorded weather calls gave the same weather values as the model in every case, with none deferred. The model kept a resolved forecast in 24 of the 56 calls. That is harmless, because the planner ignores a forecast whose `at` has passed. 14 hand-written traps all go to the model: a new estimate, a moved report time, a preliminary or hedged report, two modes, notice and document conflicting, unexplained figures, "did not exceed", an unannounced mode, and a mixed user update.
+- **Live.**
+
+  | Run | Success | Calls | Grading | Change vs L1 |
+  |---|---:|---:|---:|---:|
+  | Public, real solution | 60/60 (100/100) | 0 | $0 | |
+  | Public, model-path diagnostic | 60/60 | 80 (was 100) | $0.03833 | −9.2% |
+  | Dev | 9/9 | 12 | $0.00416 | −21% |
+  | Team cases | 5/5 | 7 | $0.00245 | −8% |
+
+  Forecast cost per episode on the model path fell from $0.000781 to $0.000566.
+- **Result.** Unseen-wording cost (Dev plus team) is $0.000472 per episode, 1.18× the allowance (efficiency about 8.5). Cumulative change from `443103b`: −29%.
+- **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.
