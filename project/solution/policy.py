@@ -940,6 +940,13 @@ def bulletin_waiver(source):
     return dict(topic=types.pop(), code=codes.pop(), version=source["version"])
 
 
+def bulletin_cutoff(source):
+    """The earliest 'before (virtual) minute N' the bulletin states, or None."""
+    minutes = [int(value) for value in re.findall(r"\bbefore (?:virtual )?minute (\d+)", (source or {}).get("text", ""),
+                                                  re.IGNORECASE)]
+    return min(minutes) if minutes else None
+
+
 def waiver_key(waiver):
     return (waiver.get("topic"), waiver.get("code"), waiver.get("version"))
 
@@ -995,8 +1002,12 @@ class TimelyController(Controller):
             self.batch(pending[:3])
         rest = pending[3:]
         waiver = bulletin_waiver(self.documents.get("hotel-bulletin"))
-        if waiver and self.world.observe()["hotel_fee"] and len(rest) % 3:
-            rest.insert(0, self.claim(waiver))  # fills a slot the remaining reads leave idle
+        # Claim during the reads when a slot is idle anyway, or when claiming after them would miss the
+        # bulletin's stated cutoff (an unwaived fee also counts against every spending ceiling).
+        cutoff = bulletin_cutoff(self.documents.get("hotel-bulletin"))
+        claim_after_reads = self.world.now + 2 * -(-len(rest) // 3) + 2
+        if waiver and self.world.observe()["hotel_fee"] and (len(rest) % 3 or (cutoff is not None and claim_after_reads >= cutoff)):
+            rest.insert(0, self.claim(waiver))
         if rest:
             self.batch(rest)
         self.interpret_observed()

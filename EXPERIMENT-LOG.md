@@ -277,6 +277,23 @@ The two stress_v1 failures and the one stress_v2 failure are case-design or timi
 
 - **Decision.** Keep.
 
+## stress_v4 and Experiment L6 — claim before an early waiver cutoff (2026-11-23)
+
+- **stress_v4 (9 cases, `tools/stress_builder_v4.py`)** covers situations not in stress_v1–v3:
+  - a mid-trip preference switch, with a suitable offer in the new mode;
+  - a preferred-mode offer that opens for sale at minute 16;
+  - a budget cut for new commitments only;
+  - 5-minute holds;
+  - a waiver cutoff at minute 8 (Forecast and Reactive);
+  - three events in one minute (amendment, transfer change, provider notice);
+  - the deadline moved earlier and then later again;
+  - step-free access required mid-trip while the booked ticket is not step-free.
+
+  The truth fields, documents, fare lines and contract are updated together, and each case is validated and checked for feasible offers.
+- **Results.** Submitted `f70eb4e`: 7/9; both early-waiver cases fail at 10/90. `73bf026`: 8/9 in two runs; its early claim saves the Reactive case. The Forecast case still fails, because no read slot is idle, so the claim rides with the first hold and completes exactly at the cutoff (minute 8). The unwaived USD 55 then counts against every ceiling, and nothing is affordable.
+- **Change.** At boot, the claim also goes first when claiming after the reads would reach the bulletin's stated "before (virtual) minute N" cutoff. The reads then end at 8 instead of 6, and the first confirmation still lands at 11. With the usual minute-30 cutoff, nothing changes.
+- **Result.** stress_v4 9/9; Public 100/100, 0 calls. **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.
