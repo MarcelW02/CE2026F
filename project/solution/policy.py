@@ -5,6 +5,7 @@ all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
+from framework.contract_interpreter import INSTRUCTIONS as CONTRACT_INSTRUCTIONS, make_schema
 from copy import deepcopy
 import json
 import re
@@ -123,6 +124,23 @@ def compare(op, variable, value):
     return {"op": op, "left": {"var": variable}, "right": value}
 
 
+def read_outlook(text):
+    outlook = re.fullmatch(
+        rf"The forecast gives a (\d+)% chance of weather delays to exposed ({MODE}) services\. "
+        r"The current delay estimate is (\d+) minutes; this estimate is not an observed operating delay\. "
+        r"The actual outcome may be harmless or may require a different service\. "
+        r"A final operating report arrives at virtual minute (\d+)\. "
+        r"Recovery options with a sales cutoff of virtual minute \d+ must be held before sales close\. "
+        r"A live hold can be confirmed after the sales cutoff until its own expiry\. "
+        r"Its visible deposit is credited toward the ticket if confirmed and otherwise remains charged\.",
+        text,
+    )
+    if not outlook:
+        return None
+    probability, mode, delay, report = outlook.groups()
+    return {"mode": mode, "delay": int(delay), "at": int(report), "probability": int(probability)}
+
+
 def read_arrival(text):
     plain = re.fullmatch(
         rf"(?:The client needs me there|Reach the client) by ({CLOCK}), including the current transfer"
@@ -131,6 +149,13 @@ def read_arrival(text):
     )
     if plain:
         return clock_minutes(plain[1])
+    appointment = re.fullmatch(
+        rf"Arrive at the client by ({CLOCK}), including the current transfer\. "
+        r"The emergency spending window does not change the appointment\.",
+        text,
+    )
+    if appointment:
+        return clock_minutes(appointment[1])
     concession = re.fullmatch(
         rf"Please arrive at the client by ({CLOCK})\. I can accept ({CLOCK}) when the selected service is a ({MODE})\. "
         r"That concession is withdrawn for \3 tickets priced above USD (\d+): "
@@ -155,6 +180,21 @@ def read_spending_limit(text):
     )
     if fixed:
         return int(fixed[1] or fixed[2])
+    emergency = re.fullmatch(
+        r"My normal total allowance is USD (\d+)\. If actual operating information confirms a "
+        rf"({MODE}) delay of at least (thirty|\d+) minutes, the emergency ceiling is USD (\d+) "
+        r"for payments completed no later than virtual minute (\d+)\. After that service window, "
+        r"new payments are again limited to USD \1\. A forecast is not enough to open the emergency allowance\. "
+        r"Both amounts include retained charges and any hotel fee\.",
+        text,
+    )
+    if emergency:
+        normal, mode, threshold, ceiling, window = emergency.groups()
+        delay = 30 if threshold == "thirty" else int(threshold)
+        return {"op": "if", "when": {"op": "and", "args": [
+            compare("ge", f"state.weather.{mode}", delay),
+            compare("le", "state.now", int(window)),
+        ]}, "then": int(ceiling), "else": int(normal)}
     quote = re.fullmatch(
         r"For this trip, a qualifying quote is a currently available step-free service, operated by any carrier "
         rf"other than ([\w -]+), that gets me to the client by ({CLOCK})\. "
@@ -196,6 +236,8 @@ def read_initial_contract(payload):
         r"A first confirmed replacement is required by virtual minute \d+\. "
         r"(?:Verify the booking before handing it over at or after minute \d+\.|"
         r"I may send partial changes later\. Keep checking current notices through minute \d+ and finish by minute \d+\.) "
+        r"(?:Read weather-forecast before the recovery sales close\. The announced risk is uncertain; "
+        r"a later operating notice will report what actually happened\. )?"
         r"Clock times and arrival minutes refer to local time after midnight; virtual minutes measure elapsed tool time\. "
         r"Spending authorization is checked when a charged action completes\. A later lower allowance does not revoke an earlier authorized payment\.",
         notices[0]["text"],
@@ -204,7 +246,14 @@ def read_initial_contract(payload):
         return None
     mode, excluded, consent, budget_id, arrival_id, transfer_id, fare_id = request.groups()
     documents = {source["id"]: source for source in payload["documents"]}
-    if set(documents) != {budget_id, arrival_id, transfer_id, fare_id, "hotel-terms", "hotel-bulletin", "traveler-profile"}:
+    expected = {budget_id, arrival_id, transfer_id, fare_id, "hotel-terms", "hotel-bulletin", "traveler-profile"}
+    extra = set(documents) - expected
+    outlook = None
+    if extra == {"weather-forecast"}:
+        outlook = read_outlook(documents["weather-forecast"]["text"])
+        if outlook is None or "Read weather-forecast before the recovery sales close." not in notices[0]["text"]:
+            return None
+    elif extra:
         return None
     sources = payload["observation"]["operational_sources"]
     if any(sources.get(key) != {"id": source_id, "version": documents[source_id]["version"]}
@@ -227,20 +276,23 @@ def read_initial_contract(payload):
     fare = re.fullmatch(FARE_HEADER + r"(?:Cancellation retains USD (\d+) from the ticket price\. The balance is refunded\.|"
                         r"If a ticket is cancelled, the provider retains USD (\d+) and refunds the rest\.)",
                         documents[fare_id]["text"])
+    refunds = ([{"offer_ids": [offer["id"] for offer in offers], "retained": int(fare[1] or fare[2])}]
+               if fare else read_weather_refunds(payload))
     budget = read_spending_limit(documents[budget_id]["text"])
     arrival = read_arrival(documents[arrival_id]["text"])
-    if not all((transfer, waiver, fare)) or budget is None or arrival is None:
+    if not all((transfer, waiver)) or refunds is None or budget is None or arrival is None:
         return None
     hotel = f"Keep the room. Read the linked hotel-bulletin for the current evidence that removes the USD {waiver[4]} charge."
     if documents["hotel-terms"]["text"] != hotel or int(waiver[3]) != documents["hotel-bulletin"]["version"]:
         return None
     return {
         "budget_limit": budget, "arrival_deadline": arrival,
-        "refund_groups": [{"offer_ids": [offer["id"] for offer in offers], "retained": int(fare[1] or fare[2])}],
+        "refund_groups": refunds,
         "facts": {
             "consent": consent, "preferred": mode, "requires_step_free": True, "avoid_carriers": [excluded] if excluded else [],
             "transfer": dict.fromkeys(("flight", "train", "coach"), int(transfer[1])),
-            "weather": dict.fromkeys(("flight", "train", "coach"), 0), "forecasts": [],
+            "weather": dict.fromkeys(("flight", "train", "coach"), 0),
+            "forecasts": [outlook] if outlook else [],
             "waiver": {"topic": waiver[1], "code": waiver[2], "version": int(waiver[3])},
         },
     }
@@ -350,6 +402,269 @@ def read_weather_refunds(payload):
     return result if result else None
 
 
+CONSENT_TOKEN = r"\bconsent-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b"
+TRAVELER_FACTS = ("preferred", "requires_step_free", "avoid_carriers")
+WEATHER_FACTS = ("weather", "forecasts")
+FACT_ORDER = (*TRAVELER_FACTS, "transfer", "waiver", *WEATHER_FACTS)
+UPDATE_KINDS = {"user_update", "forecast_update", "weather_update"}
+NOTICE_TOPICS = (
+    ("budget_limit", r"\b(?:spend|allowance|ceiling|budget|USD|supplement|payment)"),
+    ("arrival_deadline", r"\b(?:arriv|deadline|appointment|meeting|registration|check-in|client by)"),
+    ("transfer", r"\btransfer"),
+    ("waiver", r"\b(?:hotel|waiver|bulletin)"),
+)
+OFFER_KEYS = ("id", "mode", "price", "carrier", "step_free", "arrival_minute", "weather_exposed",
+              "available_from", "expires_at", "hold_fee_usd", "change_policy", "cancel_fee_usd")
+
+
+def strict_object(properties):
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+def read_ticket_refund(clause):
+    ordinary = re.fullmatch(r"[Oo]rdinary cancellation retains USD (\d+); there is no additional exception\.", clause)
+    if ordinary:
+        return int(ordinary[1])
+    deadline = re.fullmatch(r"Cancellation completed by (?:virtual )?minute (\d+), inclusive, receives a full refund\. "
+                            r"Later cancellation retains USD (\d+)\.", clause)
+    if deadline:
+        return {"op": "if", "when": compare("le", "state.now", int(deadline[1])), "then": 0, "else": int(deadline[2])}
+    reduced = re.fullmatch(r"Cancellation completed by (?:virtual )?minute (\d+) retains USD (\d+), otherwise USD (\d+)\.",
+                           clause)
+    if reduced:
+        return {"op": "if", "when": compare("le", "state.now", int(reduced[1])),
+                "then": int(reduced[2]), "else": int(reduced[3])}
+    return None
+
+
+def split_ticket_terms(text):
+    header = re.match(FARE_HEADER, text)
+    if not header:
+        return None
+    terms = {}
+    for line in text[header.end():].split("\n"):
+        ticket = re.fullmatch(r"Ticket ([\w-]+): (.+)", line)
+        if not ticket or ticket[1] in terms:
+            return None
+        terms[ticket[1]] = ticket[2]
+    return text[:header.end()], terms
+
+
+def read_ticket_refunds(offers, documents):
+    known, pending = {}, {}
+    for offer in offers:
+        reference = offer.get("refund_contract_source") or {}
+        source = documents.get(reference.get("id"))
+        if source is None or source["version"] != reference.get("version"):
+            return None
+        split = split_ticket_terms(source["text"])
+        expression = read_ticket_refund(split[1][offer["id"]]) if split and offer["id"] in split[1] else None
+        if expression is None:
+            pending.setdefault(source["id"], []).append(offer["id"])
+        else:
+            known[offer["id"]] = expression
+    return known, pending
+
+
+def read_local_facts(request, documents):
+    facts, asks = {}, set()
+    profile = re.fullmatch(
+        rf"Use a suitable ({MODE}) if one is affordable\. Keep step-free access\. The colleague's separate return "
+        r"and our existing hotel are outside this request\.(?: Do not use ([\w -]+)\.)?",
+        documents.get("traveler-profile", {}).get("text", ""))
+    prefer = re.search(rf"\bPrefer ({MODE}) whenever a suitable \1 is affordable\.", request)
+    excluded = re.search(r"\bDo not use ([\w -]+)\. All other listed carriers are permitted\.", request)
+    if (profile and prefer and prefer[1] == profile[1] and "I require step-free travel." in request
+            and (excluded[1] if excluded else None) == profile[2]
+            and (excluded or "All listed carriers are permitted." in request)):
+        facts.update(preferred=profile[1], requires_step_free=True, avoid_carriers=[profile[2]] if profile[2] else [])
+    else:
+        asks.update(TRAVELER_FACTS)
+    transfer = re.fullmatch(r"Add (\d+) minutes to terminal arrival for flight, train or coach\. "
+                            r"The result is arrival at the client, not terminal arrival\.",
+                            documents.get("transport-guide", {}).get("text", ""))
+    if transfer:
+        facts["transfer"] = dict.fromkeys(("flight", "train", "coach"), int(transfer[1]))
+    else:
+        asks.add("transfer")
+    bulletin = documents.get("hotel-bulletin")
+    waiver = bulletin and re.fullmatch(
+        r"Claim evidence type ([\w-]+), code ([\w-]+), version (\d+), before virtual minute \d+\. "
+        r"A successful claim removes the USD (\d+) charge while retaining the room\.", bulletin["text"])
+    hotel = documents.get("hotel-terms", {}).get("text")
+    if waiver and int(waiver[3]) == bulletin["version"] and hotel == (
+            f"Keep the room. Read the linked hotel-bulletin for the current evidence that removes the USD {waiver[4]} charge."):
+        facts["waiver"] = {"topic": waiver[1], "code": waiver[2], "version": int(waiver[3])}
+    else:
+        asks.add("waiver")
+    forecast = documents.get("weather-forecast")
+    outlook = read_outlook(forecast["text"]) if forecast else None
+    if forecast is None or outlook:
+        facts.update(weather=dict.fromkeys(("flight", "train", "coach"), 0), forecasts=[outlook] if outlook else [])
+    else:
+        asks.update(WEATHER_FACTS)
+    return facts, asks
+
+
+def scoped_instructions(instructions, keys, fact_keys):
+    if not instructions.startswith(CONTRACT_INSTRUCTIONS):
+        return instructions
+    intro, rest = CONTRACT_INSTRUCTIONS.split("\n\nOutput object keys:\n", 1)
+    outputs, ceiling, language, rules = rest.split("\n\n")
+    lines = [line for line in outputs.split("\n")
+             if line.split(":")[0] in keys or (fact_keys and (line.startswith("facts:") or line.startswith("Transfer values")))]
+    parts = [intro, "Output object keys:\n" + "\n".join(lines)]
+    if "budget_limit" in keys:
+        parts.append(ceiling)
+    if keys:
+        parts += [language, rules.rstrip("\n")]
+    return ("\n\n".join(parts) + "\nThis request asks only for the keys in its schema; every other field is "
+            "already compiled, and unrelated documents and offers are omitted." + instructions[len(CONTRACT_INSTRUCTIONS):])
+
+
+def compile_partially(api, settings, instructions, payload, label, previous_packet):
+    """Compile recognized or unchanged fields locally and ask the model only for the rest."""
+    notices = payload["observation"]["notices"]
+    documents = {source["id"]: source for source in payload["documents"]}
+    sources = payload["observation"]["operational_sources"]
+    offers = payload["offers"]
+    previous = payload.get("previous")
+    budget_id, arrival_id = sources["budget_limit"]["id"], sources["arrival_deadline"]["id"]
+    fare_ids = {(offer.get("refund_contract_source") or {}).get("id") for offer in offers}
+    known_ids = {budget_id, arrival_id, "traveler-profile", "transport-guide", "hotel-terms", "hotel-bulletin",
+                 "weather-forecast"} | fare_ids
+    if not offers or None in fare_ids or not set(documents) <= known_ids:
+        return None
+    asks, refunds = set(), {}
+    contract = {}
+    if previous is None:
+        if len(notices) != 1 or notices[0]["kind"] != "initial_request":
+            return None
+        tokens = set(re.findall(CONSENT_TOKEN, notices[0]["text"]))
+        if len(tokens) != 1:
+            return None
+        facts, asks = read_local_facts(notices[0]["text"], documents)
+        facts["consent"] = tokens.pop()
+        for key, source_id, reader in (("budget_limit", budget_id, read_spending_limit),
+                                       ("arrival_deadline", arrival_id, read_arrival)):
+            value = reader(documents[source_id]["text"]) if source_id in documents else None
+            if value is None:
+                asks.add(key)
+            contract[key] = value
+        pending_offers = offers
+    else:
+        if previous_packet is None or "refund_terms" not in previous:
+            return None
+        old_notices = previous_packet["observation"]["notices"]
+        new = notices[len(old_notices):]
+        if notices[:len(old_notices)] != old_notices or any(
+                notice["kind"] not in UPDATE_KINDS or re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
+            return None
+        old_documents = {source["id"]: source for source in previous_packet["documents"]}
+        changed = {source_id for source_id in set(documents) | set(old_documents)
+                   if documents.get(source_id) != old_documents.get(source_id)}
+        old_sources = previous_packet["observation"]["operational_sources"]
+        if changed - known_ids:
+            return None
+        updates = " ".join(notice["text"] for notice in new if notice["kind"] == "user_update")
+        if updates:
+            if not changed:
+                return None
+            asks.update(TRAVELER_FACTS)
+            asks.update(key for key, pattern in NOTICE_TOPICS if re.search(pattern, updates, re.IGNORECASE))
+        if any(notice["kind"] != "user_update" for notice in new) or "weather-forecast" in changed:
+            asks.update(WEATHER_FACTS)
+        for key, source_id in (("budget_limit", budget_id), ("arrival_deadline", arrival_id)):
+            if source_id in changed or sources[key] != old_sources.get(key):
+                asks.add(key)
+            contract[key] = previous[key]
+        if "traveler-profile" in changed:
+            asks.update(TRAVELER_FACTS)
+        if "transport-guide" in changed:
+            asks.add("transfer")
+        if changed & {"hotel-terms", "hotel-bulletin"}:
+            asks.add("waiver")
+        facts = deepcopy(previous["facts"])
+        old_references = {offer["id"]: offer.get("refund_contract_source") for offer in previous_packet["offers"]}
+        pending_offers = []
+        for offer in offers:
+            reference = offer["refund_contract_source"]
+            if (offer["id"] in previous["refund_terms"] and old_references.get(offer["id"]) == reference
+                    and reference["id"] not in changed):
+                refunds[offer["id"]] = deepcopy(previous["refund_terms"][offer["id"]])
+            else:
+                pending_offers.append(offer)
+    parsed = read_ticket_refunds(pending_offers, documents)
+    if parsed is None:
+        return None
+    local, pending = parsed
+    refunds.update(local)
+    pending_ids = [identifier for identifiers in pending.values() for identifier in identifiers]
+    expression_keys = [key for key in ("budget_limit", "arrival_deadline") if key in asks]
+    expression_keys += ["refund_groups"] if pending_ids else []
+    fact_keys = [key for key in FACT_ORDER if key in asks]
+
+    if expression_keys or fact_keys:
+        wanted = set()
+        if "budget_limit" in asks:
+            wanted.add(budget_id)
+        if "arrival_deadline" in asks:
+            wanted |= {arrival_id, "transport-guide"}
+        if asks & set(TRAVELER_FACTS):
+            wanted.add("traveler-profile")
+        if "transfer" in asks:
+            wanted.add("transport-guide")
+        if "waiver" in asks:
+            wanted |= {"hotel-terms", "hotel-bulletin"}
+        if asks & set(WEATHER_FACTS):
+            wanted.add("weather-forecast")
+        scoped_documents = [deepcopy(source) for source in payload["documents"]
+                            if source["id"] in wanted and source["id"] not in pending]
+        for source_id, identifiers in pending.items():
+            source = deepcopy(documents[source_id])
+            split = split_ticket_terms(source["text"])
+            if split:
+                header, terms = split
+                source["text"] = header + "\n".join(f"Ticket {identifier}: {terms[identifier]}" for identifier in identifiers)
+            scoped_documents.append(source)
+        prior = {key: previous[key] for key in ("budget_limit", "arrival_deadline") if previous and key in asks}
+        if previous and fact_keys:
+            prior["facts"] = {key: previous["facts"][key] for key in fact_keys}
+        scoped = {
+            "observation": {key: payload["observation"][key]
+                            for key in ("virtual_minute", "tier", "notices", "operational_sources")},
+            "documents": scoped_documents,
+            "offers": [{key: offer[key] for key in OFFER_KEYS if key in offer}
+                       for offer in offers if offer["id"] in pending_ids],
+            "previous": prior or None,
+        }
+        full = make_schema([offer for offer in offers if offer["id"] in pending_ids] or offers)
+        properties = {key: deepcopy(full["properties"][key]) for key in expression_keys}
+        if fact_keys:
+            properties["facts"] = strict_object({key: deepcopy(full["properties"]["facts"]["properties"][key])
+                                                 for key in fact_keys})
+        schema = strict_object(properties)
+        if expression_keys:
+            schema["$defs"] = deepcopy(full["$defs"])
+        response = api.json(settings, scoped_instructions(instructions, expression_keys, fact_keys),
+                            scoped, schema, label)
+        contract.update({key: response[key] for key in ("budget_limit", "arrival_deadline") if key in response})
+        facts.update(response.get("facts", {}))
+        for group in response.get("refund_groups", []):
+            for identifier in group["offer_ids"]:
+                if identifier in refunds or identifier not in pending_ids:
+                    return None
+                refunds[identifier] = deepcopy(group["retained"])
+    if set(refunds) != {offer["id"] for offer in offers}:
+        return None
+    groups = {}
+    for identifier, expression in refunds.items():
+        groups.setdefault(json.dumps(expression, sort_keys=True), {"offer_ids": [], "retained": expression})
+        groups[json.dumps(expression, sort_keys=True)]["offer_ids"].append(identifier)
+    return {"budget_limit": contract["budget_limit"], "arrival_deadline": contract["arrival_deadline"],
+            "refund_groups": list(groups.values()), "facts": facts}
+
+
 def choose_offer_with_decisions(observation, trip_state, offers, api):
     """Optional paid proposal; solve does not call this helper by default.
 
@@ -409,7 +724,8 @@ def solve(world, api, config, route_fn):
             if result is None:
                 result = read_spending_amendment(payload, previous_packet)
             if result is None:
-                result = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
+                result = (compile_partially(api, settings, instructions, payload, label, previous_packet)
+                          or interpret_with_consent_references(api, settings, instructions, payload, schema, label))
                 if refunds := read_weather_refunds(payload):
                     result = dict(result, refund_groups=refunds)
             previous_packet = payload
