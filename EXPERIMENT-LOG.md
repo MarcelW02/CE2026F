@@ -148,6 +148,23 @@ The local budget launcher now accepts an explicit worker count. This batch uses 
 
 Experiments 13–15 used **$0.05450615 in estimated API spend**, within the $0.25 batch cap. The verified result covers the published Public bank. The solver falls back to the model on unfamiliar documents, and staff evaluation on team-contributed and hidden cases remains unverified.
 
+## Experiment L1 — Scope the interpreter instructions to the requested keys (2026-11-23)
+
+- **Baseline.** `branch_louisa` at `443103b`. Public uses 0 calls, because local readers compile every Public document. On unseen wording (Dev plus team cases), cost is $0.000666 per episode, 1.66× the allowance. Recorded calls were about one third instructions, one third strict schema and one third case data.
+- **Change.** `scoped_instructions` now builds instructions for only the keys and facts in the call's schema. It no longer repeats the expression grammar and field lists, which the strict schema already fixes. It keeps every semantic rule: candidate and booking meaning, `now`, quantifier binding, the ceiling example, and the refund and ceiling rules. `PROJECT_PROMPT` is split into named parts in `prompts.py`; the full-path text is unchanged. Scoped calls drop the waiver part when the waiver is not asked, and drop the exception-branch part for facts-only calls.
+- **Offline.** Across the 27 recorded calls, instruction tokens fell from 26,523 to 15,072 (−43%).
+- **Validation on the model path.** Two diagnostic solution copies, never submitted, switch off the wording-specific readers, so all 60 Public episodes go through the model. They differ only in the prompt.
+
+  | Run | Success | Grading | Change |
+  |---|---:|---:|---:|
+  | Public diagnostic, old prompt | 60/60 | $0.04631 | |
+  | Public diagnostic, new prompt | 60/60 | $0.04222 | −8.8% |
+  | Dev, real solution (old run: $0.00617) | 9/9 | $0.00527 | −14.6% |
+  | Team cases, real solution (old run: $0.00315) | 5/5 | $0.00267 | −15.4% |
+
+- **Result.** Unseen-wording cost fell to $0.000567 per episode (1.41× the allowance, efficiency about 7.1, up from 6.0), with no outcome loss in 74 episodes. Output tokens, which include reasoning, did not change and are now 32–39% of cost.
+- **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.

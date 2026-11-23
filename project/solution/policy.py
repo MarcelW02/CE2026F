@@ -6,6 +6,7 @@ read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
 from framework.contract_interpreter import INSTRUCTIONS as CONTRACT_INSTRUCTIONS, make_schema
+from .prompts import PROJECT_PARTS, PROJECT_PROMPT
 from copy import deepcopy
 import json
 import re
@@ -506,20 +507,71 @@ def read_local_facts(request, documents):
     return facts, asks
 
 
+SCOPED_INTRO = (
+    "You compile currently observed travel contract fields into the typed object required by the response schema. "
+    "You do not grade, choose an offer, or infer future events. Interpret ordinary English scope, exceptions, "
+    "amendments and inequalities exactly. Preserve unamended conditions. The current authoritative source versions "
+    "supersede earlier text only for their stated scope. A forecast is a possibility, never realized weather. "
+    "This request asks only for the keys in its schema; every other field is already compiled, and unrelated "
+    "documents and offers are omitted."
+)
+FACT_NOTES = {
+    "preferred": "preferred: the preferred mode.",
+    "requires_step_free": "requires_step_free: whether step-free access is required.",
+    "avoid_carriers": "avoid_carriers: excluded carrier names. Ordinary access/carrier facts apply to the current trip.",
+    "transfer": "transfer: minutes per mode added to terminal arrival to reach the client.",
+    "waiver": "waiver: topic, code and version of the current hotel bulletin's actual evidence, not archived examples.",
+    "weather": "weather: realized delay minutes per mode only, zero before realization.",
+    "forecasts": ("forecasts: explicitly announced possible weather delays. Its at is the virtual minute of the "
+                  "upcoming final operating report or uncertainty resolution, not the forecast's issue/revision time "
+                  "or a backup sales cutoff. Use null for an unstated report time, delay or probability."),
+}
+EXPRESSION_NOTES = (
+    "Expressions use the schema's forms; if branches short-circuit; 'in' requires a list on the right; ordering "
+    "requires numbers. exists and minimum bind item to each pool object without changing outer candidate/booking; "
+    "minimum returns the least value over matching items, else its default.\n"
+    "candidate is the proposed offer or hold at purchase and the active booking when checking arrival; booking is "
+    "empty before purchase. At cancellation both are the cancelled booking. now is action COMPLETION minute. "
+    "meeting_arrival is terminal arrival plus current transfer. Missing optional object fields are null. offers is "
+    "current unheld on-sale inventory plus a candidate's valid held offer; holds is all live holds. State amounts are "
+    "actual current ledger amounts; retained_fees means cancellation retention only. Quoted fare price already "
+    "includes any reservation deposit credited when confirmed."
+)
+EXPRESSION_RULES = (
+    "Do not encode a preferred/optimal offer ID, read case IDs as clues, guess hidden schedules, translate conditions "
+    "into unexplained booleans, or return prose instead of expressions. Keep every threshold and exception inside its "
+    "proper conditional scope. Compile from source text, using previous interpretation only to preserve facts not "
+    "amended by current evidence."
+)
+REFUND_RULES = (
+    "Reference offer IDs only to map refund expressions to observed tickets. Base numeric change_policy/cancel_fee_usd "
+    "are ordinary terms; conditional prose overrides them. For ordinary fee fares with no exceptions the refund "
+    "expression is the numeric base retention; flexible is 0 and locked is null."
+)
+CEILING_RULE = "All monetary ceilings are total spending, unless the prose explicitly compares prices inside a condition."
+
+
 def scoped_instructions(instructions, keys, fact_keys):
-    if not instructions.startswith(CONTRACT_INSTRUCTIONS):
+    """Instructions for only the requested keys; the strict schema already fixes the expression grammar."""
+    if instructions != CONTRACT_INSTRUCTIONS + "\n" + PROJECT_PROMPT:
         return instructions
-    intro, rest = CONTRACT_INSTRUCTIONS.split("\n\nOutput object keys:\n", 1)
-    outputs, ceiling, language, rules = rest.split("\n\n")
-    lines = [line for line in outputs.split("\n")
-             if line.split(":")[0] in keys or (fact_keys and (line.startswith("facts:") or line.startswith("Transfer values")))]
-    parts = [intro, "Output object keys:\n" + "\n".join(lines)]
+    outputs, ceiling = CONTRACT_INSTRUCTIONS.split("\n\nOutput object keys:\n", 1)[1].split("\n\n")[:2]
+    key_lines = {line.split(":")[0]: line for line in outputs.split("\n")}
+    lines = [key_lines[key] for key in keys]
+    if fact_keys:
+        lines.append("facts: " + " ".join(FACT_NOTES[key] for key in fact_keys))
+    parts = [SCOPED_INTRO, "Output object keys:\n" + "\n".join(lines)]
     if "budget_limit" in keys:
         parts.append(ceiling)
     if keys:
-        parts += [language, rules.rstrip("\n")]
-    return ("\n\n".join(parts) + "\nThis request asks only for the keys in its schema; every other field is "
-            "already compiled, and unrelated documents and offers are omitted." + instructions[len(CONTRACT_INSTRUCTIONS):])
+        rules = [EXPRESSION_RULES]
+        rules += [REFUND_RULES] if "refund_groups" in keys else []
+        rules += [CEILING_RULE] if "budget_limit" in keys else []
+        parts += [EXPRESSION_NOTES, " ".join(rules)]
+    project = ["intro"] + (["waiver"] if "waiver" in fact_keys else []) + ["amendments"]
+    project += ["exceptions"] if keys else []
+    parts.append("\n".join(PROJECT_PARTS[name] for name in project))
+    return "\n\n".join(parts)
 
 
 def compile_partially(api, settings, instructions, payload, label, previous_packet):
