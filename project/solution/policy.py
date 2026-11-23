@@ -6,6 +6,7 @@ read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
 from framework.contract_interpreter import INSTRUCTIONS as CONTRACT_INSTRUCTIONS, make_schema
+from framework.operational_expressions import validate_expression
 from copy import deepcopy
 import json
 import re
@@ -704,6 +705,32 @@ def route(observation, memory):
     return travel_route(observation, memory)
 
 
+LIMITS_NOTE = (
+    "\nYour previous reply was rejected by the published expression validator: {error} "
+    "Return the same contract as a valid object: every expression has depth at most 12 and at most 128 nodes, "
+    "at most two nested exists/minimum quantifiers, item only inside exists or minimum, and numeric results for "
+    "budget_limit and arrival_deadline (refunds may be null). Keep every stated condition."
+)
+
+
+def expression_problem(result):
+    """The framework validator's objection to any compiled expression, or None when all are valid.
+
+    The supplied planner validates expressions only when it first evaluates them, so an invalid one ends the
+    episode. Checking before planning lets an invalid local or scoped result fall back to the full interpreter,
+    and an invalid full reply get one bounded repair request naming the validator's error.
+    """
+    try:
+        for key in ("budget_limit", "arrival_deadline"):
+            if key in result:
+                validate_expression(result[key], result_kind="number")
+        for group in result.get("refund_groups", []):
+            validate_expression(group["retained"], result_kind="refund")
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        return str(error) or type(error).__name__
+    return None
+
+
 def solve(world, api, config, route_fn):
     """Retain the supplied agent, or implement your own observed-information loop.
 
@@ -716,18 +743,31 @@ def solve(world, api, config, route_fn):
     if config["architecture"] == "hybrid_single" and world.observe().get("operational_sources"):
         previous_packet = None
 
+        def full_interpretation(settings, instructions, payload, schema, label):
+            result = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
+            if refunds := read_weather_refunds(payload):
+                result = dict(result, refund_groups=refunds)
+            return result
+
         def interpret(settings, instructions, payload, schema, label):
             nonlocal previous_packet
+            full = False
             result = resolve_observed_weather(payload, previous_packet)
             if result is None:
                 result = read_initial_contract(payload)
             if result is None:
                 result = read_spending_amendment(payload, previous_packet)
             if result is None:
-                result = (compile_partially(api, settings, instructions, payload, label, previous_packet)
-                          or interpret_with_consent_references(api, settings, instructions, payload, schema, label))
-                if refunds := read_weather_refunds(payload):
+                result = compile_partially(api, settings, instructions, payload, label, previous_packet)
+                if result is not None and (refunds := read_weather_refunds(payload)):
                     result = dict(result, refund_groups=refunds)
+            if result is None or expression_problem(result):
+                # An invalid local or scoped result is not planned with: the full interpreter compiles it instead.
+                result, full = full_interpretation(settings, instructions, payload, schema, label), True
+            if full and (error := expression_problem(result)):
+                # One bounded repair of a content mistake, naming the validator's objection.
+                result = full_interpretation(settings, instructions + LIMITS_NOTE.format(error=error), payload, schema,
+                                             dict(label, attempt="limits_repair"))
             previous_packet = payload
             return result
 
