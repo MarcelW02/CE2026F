@@ -205,6 +205,55 @@ Experiments 13–15 used **$0.05450615 in estimated API spend**, within the $0.2
 - **Result.** Unseen-wording cost is $0.000449 per episode (1.12× the allowance, efficiency about 8.9). Cumulative change from `443103b`: −33%.
 - **Decision.** Keep both.
 
+## Submission of 2026-11-23
+
+`f70eb4e` (L1–L3 on top of `branch_louisa`) was emailed for leaderboard grading. Its leaderboard result is still pending.
+
+## Local stress banks (tools/stress_builder*.py, gitignored output in local_cases/)
+
+The official set is 30 Public plus 90 cases we cannot see. Dev and team cases underestimate their cost and difficulty: Louisa's version scored 91.04 on the leaderboard, with $0.00102 per non-Public episode against $0.000666 locally. Three generated banks keep the template offers and correct contract answers, and each is validated and checked for solvable offers:
+
+- **stress_v1 (19):** all text reworded, renamed documents, other line formats, and structural events Public and Dev never use (extra linked document, provider notice, transfer change, hotel bulletin replacement, a carrier ban only in a message, unfamiliar weather report wording). Louisa's version cost 1.40× its Dev and team cost here, against 1.53× on the leaderboard, so this bank predicts unfamiliar-case cost well.
+- **stress_v2 (18):** harder rule logic: added and tiered supplements, derived deadlines, grouped ticket terms, relative or spelled amendments, split or combined updates.
+- **stress_v3 (15):** the Reactive situations from the course slides at realistic times: an amendment, carrier ban or revised forecast at minute 6 or 8, interrupted confirmations, warned sellouts, mid-trip carrier bans, transfer changes and waiver revisions.
+
+| Bank | Louisa `443103b` | Submitted `f70eb4e` |
+|---|---|---|
+| stress_v1 | 17/19, $0.000934 per episode | 17/19, $0.000774 per episode (−17%) |
+| stress_v2 | 17/18 ×2, $0.000740 | 17/18 ×2, $0.000514 (−31%) |
+| stress_v3 | — | **6/15 in both runs** |
+
+The two stress_v1 failures and the one stress_v2 failure are case-design or timing issues explained below. **In stress_v3 all 9 failures were deterministic planner timing:** the supplied boot reads every source (minutes 0–6) and then claims the waiver alone (6–8). Any notice before minute 8 adds a 2-minute refresh, so the first confirmation lands at minute 13, after the minute-12 deadline. In Forecast, the recovery sales (closing at 14) are then missed as well.
+
+## Experiment L4 — TimelyController and degenerate-expression repairs (2026-11-23)
+
+- **TimelyController** (a subclass of the framework Controller in `policy.py`; offer choice, budgets, refunds and preparation rules are unchanged):
+  1. The hotel bulletin leads the second read round, and when its evidence is unambiguous (one evidence type, one proof code, no archived or superseded wording) the claim fills the slot the last read round leaves idle.
+  2. Otherwise the claim and the first hold share one batch. The plan assumes the claim succeeds, which only affects its budget check.
+  3. A failed or superseded claim is retried once with the current interpreted evidence.
+  4. A `stock_update` warning ("… for trip-X at virtual minute N") caps that offer's planning expiry at N.
+  5. When the recovery window is closing as the first confirmation completes, the recovery is held in the same batch as the `status` check. The choice is the supplied `prepare()` logic without deferral.
+
+  First confirmation moves from minute 11 to 9 (Basic, Reactive) and to 10 (Forecast). A wrong claim is harmless (`ok=False`, no violation).
+- **Repairs of degenerate model output** (applied to every interpretation; across 946 recorded outputs, none becomes invalid and 3 crashing ones become valid):
+  - a free `item.*` becomes `booking.*` in refund rules and `candidate.*` in spending or arrival rules;
+  - inside the `holds` pool, expiry-versus-now and `item.status` tests become `true`, because the pool holds only live holds (the model sometimes inverted them or used status "live");
+  - a `minimum` whose filter uses `item` but whose value is constant becomes `item.price`.
+- **First attempt regressed** (Public 93.33): `hotel-bulletin` only enters the catalog after `hotel-terms` is read, so the original first batch is kept.
+
+| Bank (final code) | Result |
+|---|---|
+| Public | 100/100, 0 calls (three runs) |
+| Dev | 9/9 (two runs) |
+| Team cases | 5/5 and 4/5 (team2-5, zero-reasoning misreading) |
+| stress_v1 | 17/19 (stress-05 and stress-07: zero-reasoning outputs, both repaired by the final repairs) |
+| stress_v2 | 18/18 |
+| stress_v3 | **15/15** (was 6/15) |
+
+  Cost per episode is unchanged.
+- **Remaining risk: zero-reasoning calls.** At effort low, about 11% of calls return 0 reasoning tokens. Episodes with such a call failed 14% of the time (14/102), against 5% otherwise (27/548). Every random misreading in L4's runs came from one. Repairs cover the recurring structural forms; plain value errors (610 for 09:50, 145 for a conditional ceiling) remain.
+- **Decision.** Keep.
+
 ## Recording future experiments
 
 For each candidate, record the date, pinned baseline and candidate, one hypothesis, source diff, input scope, evidence checks, repeat counts, outcome and cost, what the trace shows, and whether the change was kept. Use the runner's fresh output directories as the supporting evidence. Record discarded variants and incomplete runs alongside promoted ones.

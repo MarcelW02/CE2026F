@@ -5,7 +5,9 @@ all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
-from framework.contract_interpreter import INSTRUCTIONS as CONTRACT_INSTRUCTIONS, make_schema
+from framework.contract_interpreter import (INSTRUCTIONS as CONTRACT_INSTRUCTIONS, compile_contract, make_schema,
+                                            role_source_ids)
+from framework.contract_policy import Controller, action
 from .prompts import PROJECT_PARTS, PROJECT_PROMPT
 from copy import deepcopy
 import json
@@ -835,29 +837,379 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
             "refund_groups": list(groups.values()), "facts": facts}
 
 
-def bind_free_items(expression, inside=False):
-    """Rename item.* outside exists/minimum to booking.*.
+def bind_free_items(expression, inside=False, root="booking"):
+    """Rename item.* outside exists/minimum to the only ticket in scope.
 
-    No pool object is bound there, so in a refund rule the only possible ticket is the cancelled booking.
+    No pool object is bound there: in a refund rule that ticket is the cancelled booking, and in a spending or
+    arrival rule it is the candidate being purchased or checked.
     """
     if isinstance(expression, list):
-        return [bind_free_items(value, inside) for value in expression]
+        return [bind_free_items(value, inside, root) for value in expression]
     if not isinstance(expression, dict):
         return expression
     if expression.get("op") in ("exists", "minimum"):
-        return {key: bind_free_items(value, inside or key in ("where", "value")) for key, value in expression.items()}
+        return {key: bind_free_items(value, inside or key in ("where", "value"), root) for key, value in expression.items()}
     variable = expression.get("var")
     if not inside and set(expression) == {"var"} and isinstance(variable, str) and variable.startswith("item."):
-        return {"var": "booking." + variable[len("item."):]}
-    return {key: bind_free_items(value, inside) for key, value in expression.items()}
+        return {"var": root + "." + variable[len("item."):]}
+    return {key: bind_free_items(value, inside, root) for key, value in expression.items()}
+
+
+def mentions(expression, *roots):
+    if isinstance(expression, dict):
+        return (isinstance(expression.get("var"), str) and expression["var"].split(".")[0] in roots) or any(
+            mentions(value, *roots) for value in expression.values())
+    return isinstance(expression, list) and any(mentions(value, *roots) for value in expression)
+
+
+def is_liveness_test(expression):
+    """Expiry-versus-now or a status test on item: always settled inside the live-holds pool."""
+    if not isinstance(expression, dict):
+        return False
+    sides = {json.dumps(expression.get("left")), json.dumps(expression.get("right"))}
+    if expression.get("op") in ("lt", "le", "gt", "ge"):
+        return sides == {json.dumps({"var": "item.expires_at"}), json.dumps({"var": "state.now"})}
+    return (expression.get("op") in ("eq", "ne", "in") and json.dumps({"var": "item.status"}) in sides)
+
+
+def price_minimums(expression, in_holds=False):
+    """Normalize two degenerate quantifier forms.
+
+    A minimum whose properly bound filter uses item but whose value is a constant means the item's price (fares).
+    Inside the holds pool every item is a live hold, so an expiry-versus-now comparison there is redundant; an
+    inverted one would wrongly require an expired hold, so it is replaced by true.
+    """
+    if isinstance(expression, list):
+        return [price_minimums(value, in_holds) for value in expression]
+    if not isinstance(expression, dict):
+        return expression
+    if in_holds and is_liveness_test(expression):
+        return True
+    pool_holds = expression.get("op") in ("exists", "minimum") and expression.get("pool") == "holds"
+    result = {key: price_minimums(value, pool_holds if key in ("where", "value") else in_holds)
+              for key, value in expression.items()}
+    if (result.get("op") == "minimum" and mentions(result.get("where"), "item")
+            and not mentions(result.get("value"), "item", "candidate", "booking")):
+        result["value"] = {"var": "item.price"}
+    return result
 
 
 def bind_refund_items(result):
-    if not isinstance(result, dict) or not isinstance(result.get("refund_groups"), list):
+    if not isinstance(result, dict):
         return result
-    groups = [dict(group, retained=bind_free_items(group["retained"])) if isinstance(group, dict) and "retained" in group
-              else group for group in result["refund_groups"]]
+    result = dict(result, **{key: price_minimums(bind_free_items(result[key], root="candidate"))
+                             for key in ("budget_limit", "arrival_deadline") if key in result})
+    if not isinstance(result.get("refund_groups"), list):
+        return result
+    groups = [dict(group, retained=price_minimums(bind_free_items(group["retained"])))
+              if isinstance(group, dict) and "retained" in group else group for group in result["refund_groups"]]
     return dict(result, refund_groups=groups)
+
+
+WAIVER_TYPE = re.compile(r"\b[a-z]+(?:-[a-z]+)*-(?:reference|letter|receipt|notice|record|confirmation)\b")
+SUPERSEDED_EVIDENCE = re.compile(r"\b(?:archive|archived|withdrawn|previous|former|earlier|old|last year|another room|"
+                                 r"no longer|expired|example)\b", re.IGNORECASE)
+SELLOUT_WARNING = re.compile(r"\b(trip-[\w-]*\w)\b[^.]*?\b(?:virtual )?minute (\d+)", re.IGNORECASE)
+
+
+def bulletin_waiver(source):
+    """Claim arguments when a bulletin names exactly one evidence type and proof code; otherwise None."""
+    if not source:
+        return None
+    text = source["text"]
+    codes = set(re.findall(r"\bproof-[\w-]*\w", text))
+    types = set(WAIVER_TYPE.findall(text))
+    versions = {int(value) for value in re.findall(r"\bversion\s+(\d+)", text, re.IGNORECASE)}
+    if len(codes) != 1 or len(types) != 1 or versions - {source["version"]} or SUPERSEDED_EVIDENCE.search(text):
+        return None
+    return dict(topic=types.pop(), code=codes.pop(), version=source["version"])
+
+
+def waiver_key(waiver):
+    return (waiver.get("topic"), waiver.get("code"), waiver.get("version"))
+
+
+class TimelyController(Controller):
+    """The framework planner with faster first service; offer choice, budgets and refunds are unchanged.
+
+    With three tool slots, the supplied boot reads every source (6 minutes), then claims the waiver alone
+    (2 minutes), then holds and confirms. Any notice before minute 8 adds a 2-minute refresh, so the first
+    confirmation lands after the minute-12 deadline, and a Forecast recovery hold misses its sales cutoff.
+    This controller (1) claims during the boot reads when the bulletin evidence is unambiguous, using the slot
+    those reads leave idle; (2) otherwise claims and holds the first planned booking in one batch, planning as
+    if the claim succeeds; (3) retries a failed or superseded claim with the current interpreted evidence; and
+    (4) treats a warned sellout minute as that offer's sales cutoff, so preparation holds it in time.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.claimed = set()
+
+    def batch(self, actions):
+        results = super().batch(actions)
+        # A stock warning names when unheld inventory disappears; plan as if sales close then.
+        for notice in self.world.observe()["notices"]:
+            if notice["kind"] == "stock_update":
+                for identifier, minute in SELLOUT_WARNING.findall(notice["text"]):
+                    if identifier in self.offers:
+                        self.offers[identifier]["expires_at"] = min(self.offers[identifier]["expires_at"], int(minute))
+        return results
+
+    def claim(self, waiver):
+        self.claimed.add(waiver_key(waiver))
+        return action("claim", topic=waiver["topic"], code=waiver["code"], version=waiver["version"])
+
+    def refresh(self, initial=False):
+        if not initial:
+            return super().refresh()
+        # As supplied: hotel-terms first, because it links the bulletin into the catalog.
+        observation = self.world.observe()
+        first = [action("search")]
+        if any(source["id"] == "hotel-terms" for source in observation["source_catalog"]):
+            first.append(action("read", id="hotel-terms"))
+        spend_source = observation["operational_sources"]["budget_limit"]["id"]
+        if spend_source != "hotel-terms":
+            first.append(action("read", id=spend_source))
+        self.batch(first)
+        # Then the bulletin leads the next round, so the round after it can carry the claim.
+        observation = self.world.observe()
+        pending = sorted((action("read", id=source["id"]) for source in observation["source_catalog"]
+                          if source["id"] not in self.documents or self.documents[source["id"]]["version"] != source["version"]),
+                         key=lambda row: row["arguments"]["id"] != "hotel-bulletin")
+        if pending:
+            self.batch(pending[:3])
+        rest = pending[3:]
+        waiver = bulletin_waiver(self.documents.get("hotel-bulletin"))
+        if waiver and self.world.observe()["hotel_fee"] and len(rest) % 3:
+            rest.insert(0, self.claim(waiver))  # fills a slot the remaining reads leave idle
+        if rest:
+            self.batch(rest)
+        self.interpret_observed()
+
+    def interpret_observed(self):
+        """The supplied refresh after its first batch: read remaining changes, interpret, bind purchased terms."""
+        while not self.world.finished:
+            observation = self.world.observe()
+            pending = [action("read", id=source["id"]) for source in observation["source_catalog"]
+                       if source["id"] not in self.documents or self.documents[source["id"]]["version"] != source["version"]]
+            if not pending:
+                break
+            self.batch(pending)
+        observation = self.world.observe()
+        payload_observation = deepcopy(observation)
+        payload_observation.pop("case_id", None)
+        payload = dict(observation=payload_observation, documents=deepcopy(list(self.documents.values())),
+                       offers=deepcopy(list(self.offers.values())), previous=deepcopy(self.program))
+        if self.program is None or self.refresh_context:
+            self.program = self.interpret(payload)
+            self.interpreted_documents = deepcopy(self.documents)
+        for identifier in self.sale_ids:
+            self.offer_weather[identifier] = deepcopy(self.facts["weather"])
+        self.revision = observation["revision"]
+        if self.program is None:
+            return
+        for booking in self.world.observe()["bookings"]:
+            if booking.get("status") != "confirmed" or booking.get("kind") != "transport":
+                continue
+            if self.booked_programs.get(booking["id"]) is not None:
+                continue
+            reference = booking.get("refund_contract_source", {})
+            source = self.interpreted_documents.get(reference.get("id"))
+            if source and source["version"] == reference.get("version"):
+                self.booked_programs[booking["id"]] = deepcopy(self.program["refund_terms"].get(booking["option_id"]))
+                self.booked_evidence[booking["id"]] = dict(purchased_source=deepcopy(reference),
+                                                           read_source=deepcopy(source), interpreted_version_matches=True)
+
+    def recovery_opportunity(self, observation, booking):
+        """The supplied prepare() choice of one affordable recovery, without deferral and without the hold call."""
+        opportunities = []
+        for forecast in self.facts["forecasts"]:
+            when, delay = forecast.get("at"), forecast.get("delay")
+            if type(when) not in (int, float) or type(delay) not in (int, float) or when <= self.world.now:
+                continue
+            scenario = dict(self.facts["weather"], **{forecast["mode"]: delay})
+            if self.keep_valid(observation, booking, weather=scenario, at=when):
+                continue
+            if any(hold["status"] == "held" and hold["expires_at"] > when + 4
+                   and (candidate := self.offers.get(hold["option_id"]))
+                   and self.purchase_plan(observation, candidate, booking, weather=scenario, at=when) is not None
+                   for hold in observation["holds"]):
+                continue
+            for offer in self.candidates(observation):
+                if offer["id"] == booking["option_id"]:
+                    continue
+                if any(hold["option_id"] == offer["id"] and hold["status"] == "held" and hold["expires_at"] > when + 4
+                       for hold in observation["holds"]):
+                    continue
+                if offer["expires_at"] > when + 1 or self.world.now + 1 >= offer["expires_at"]:
+                    continue
+                context = self.context(observation, offer, at=self.world.now + 1)
+                fee = offer.get("hold_fee_usd", 0)
+                limit = self.number(self.program["budget_limit"], context) if fee else None
+                if fee and (limit is None or observation["net_transport_spend_usd"] + observation["hotel_fee"] + fee > limit):
+                    continue
+                imagined = deepcopy(observation)
+                imagined["virtual_minute"] = when
+                imagined["net_transport_spend_usd"] += fee
+                imagined["uncredited_hold_deposits_usd"] = imagined.get("uncredited_hold_deposits_usd", 0) + fee
+                imagined["holds"].append(dict(offer, id="anticipated-hold", option_id=offer["id"], held_at=self.world.now + 1,
+                                              expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
+                plan = self.purchase_plan(imagined, offer, booking, weather=scenario, at=when)
+                if plan is not None:
+                    opportunities.append((not plan["preferred"], fee, plan["expense"], offer["expires_at"], offer))
+        return min(opportunities, key=lambda row: row[:4])[4] if opportunities else None
+
+    def implement(self, plan, booking):
+        """The supplied implement(); after a confirmation whose recovery window is closing, hold it while verifying."""
+        offer, held = plan["option"], plan["hold"]
+        if held is None:
+            result = self.call("hold", id=offer["id"])
+            if not result.get("ok"):
+                return False
+            held = result["hold"]
+        if self.world.observe()["revision"] != self.revision:
+            self.refresh()
+        current = self.active(self.world.observe())
+        revised = self.purchase_plan(self.world.observe(), self.offers[offer["id"]], current)
+        if revised is None:
+            return False
+        if current:
+            result = self.call("cancel", id=current["id"], code=self.facts["consent"])
+            if not result.get("ok"):
+                return False
+            if self.world.observe()["revision"] != self.revision:
+                self.refresh()
+            revised = self.purchase_plan(self.world.observe(), self.offers[offer["id"]])
+            if revised is None:
+                return False
+        offer, held = revised["option"], revised["hold"]
+        if held is None:
+            return False
+        self.serial += 1
+        key = "contract-booking-" + str(self.serial)
+        confirmed = self.call("confirm", id=held["id"], code=self.facts["consent"], key=key).get("booking") or {}
+        recovery = None
+        if self.advance_preparation and confirmed.get("status") == "confirmed":
+            recovery = self.recovery_opportunity(self.world.observe(), confirmed)
+            if recovery is not None and recovery["expires_at"] - 2 > self.world.now:
+                recovery = None  # still time: the run loop's prepare() handles it at its latest start
+        if recovery is None:
+            receipt = self.call("status", key=key)
+        else:
+            receipt, prepared = self.batch([action("status", key=key), action("hold", id=recovery["id"])])
+            self.trace.append(dict(kind="preparation", strategy="one affordable recovery, held while verifying",
+                                   option_id=recovery["id"], result=deepcopy(prepared)))
+        if receipt.get("booking") and receipt["booking"]["status"] == "confirmed":
+            booking = receipt["booking"]
+            reference = booking.get("refund_contract_source", {})
+            evidence = self.interpreted_documents.get(reference.get("id"))
+            matches = evidence is not None and evidence["version"] == reference.get("version")
+            self.booked_programs[booking["id"]] = (
+                deepcopy(self.program["refund_terms"][offer["id"]]) if matches else None)
+            self.booked_evidence[booking["id"]] = dict(
+                purchased_source=deepcopy(reference), read_source=deepcopy(evidence), interpreted_version_matches=matches)
+            return True
+        return False
+
+    def claim_pending_waiver(self, first=False):
+        """Claim the current interpreted evidence once; on the first pass, hold the planned booking alongside."""
+        observation = self.world.observe()
+        waiver = self.facts["waiver"]
+        if not observation["hotel_fee"] or waiver_key(waiver) in self.claimed:
+            return
+        plan = None
+        if first and not self.active(observation):
+            plan = self.choose_plan(dict(observation, hotel_fee=0), None)
+        if plan is None or plan["hold"] is not None:
+            self.batch([self.claim(waiver)])
+            return
+        _, held = self.batch([self.claim(waiver), action("hold", id=plan["option"]["id"])])
+        if held.get("ok"):
+            self.trace.append(dict(kind="planned_purchase", at=self.world.now, plan=deepcopy(plan)))
+            self.implement(dict(plan, hold=held["hold"]), None)
+
+    def run(self):
+        """The supplied run loop, with claim_pending_waiver in place of its single initial claim."""
+        self.refresh(initial=True)
+        if self.world.finished:
+            return
+        self.claim_pending_waiver(first=True)
+        for iteration in range(self.max_decisions):
+            if self.world.finished:
+                break
+            observation = self.world.observe()
+            if observation["revision"] != self.revision:
+                current = self.active(observation)
+                if current and self.advance_preparation:
+                    self.prepare(observation, current)
+                self.refresh()
+                observation = self.world.observe()
+            self.claim_pending_waiver()
+            observation = self.world.observe()
+            if any(booking.get("status") == "pending_verification" for booking in observation["bookings"]):
+                self.call("status")
+                observation = self.world.observe()
+            booking = self.active(observation)
+            plan = self.choose_plan(observation, booking)
+            if plan:
+                self.trace.append(dict(kind="planned_purchase", at=self.world.now, plan=deepcopy(plan)))
+                self.implement(plan, booking)
+                continue
+            if observation["virtual_minute"] >= observation["handoff_minute"]:
+                self.call("finish")
+                break
+            wake = None
+            if booking and self.advance_preparation:
+                wake = self.prepare(observation, booking)
+                if wake == self.world.now:
+                    continue
+            observation = self.world.observe()
+            next_time = min(observation["handoff_minute"], self.world.now + 2)
+            if wake is not None and wake > self.world.now:
+                next_time = min(next_time, wake)
+            for forecast in self.facts["forecasts"]:
+                when = forecast.get("at")
+                if type(when) in (int, float) and when > self.world.now:
+                    next_time = min(next_time, when)
+            self.call("wait", minutes=max(1, min(36, int(next_time - self.world.now))))
+        if not self.world.finished:
+            self.call("finish")
+
+
+def run_timely_hybrid(world, api, config, route_fn):
+    """The supplied run_operational_hybrid, driving TimelyController instead of Controller."""
+    traces, memory, seen_versions = [], {}, {}
+
+    def interpret(payload):
+        observation = payload["observation"]
+        domains = list(dict.fromkeys(route_fn(observation, deepcopy(memory))))
+        if any(domain not in ("traveler", "transport", "hotel") for domain in domains):
+            raise ValueError("Route to traveler, transport, or hotel.")
+        if payload.get("previous") is None:
+            domains = ["traveler", "transport", "hotel"]
+        scopes = role_source_ids(payload)
+        for source in payload["documents"]:
+            if seen_versions.get(source["id"]) != source["version"]:
+                for domain, identifiers in scopes.items():
+                    if source["id"] in identifiers and domain not in domains:
+                        domains.append(domain)
+        previous_refunds = (payload.get("previous") or {}).get("refund_terms", {})
+        if set(previous_refunds) != {offer["id"] for offer in payload["offers"]} and "transport" not in domains:
+            domains.append("transport")
+        result = compile_contract(payload, api, config, domains, traces)
+        seen_versions.update({source["id"]: source["version"] for source in payload["documents"]})
+        memory.update(investigated=True, revision=observation["revision"], investigated_at=observation["virtual_minute"])
+        return result
+
+    controller = TimelyController(world, interpret, traces, refresh_context=config["refresh_context"],
+                                  max_decisions=config["max_decisions"],
+                                  prepare=config.get("forecast_strategy", "precaution") != "cheapest")
+    controller.run()
+    memory.update(documents=deepcopy(controller.documents), compiled=deepcopy(controller.program),
+                  purchased_refund_terms=deepcopy(controller.booked_programs),
+                  purchased_refund_evidence=deepcopy(controller.booked_evidence))
+    return dict(traces=traces, working_memory=memory,
+                context=dict(architecture=config["architecture"], source_versions=seen_versions))
 
 
 def choose_offer_with_decisions(observation, trip_state, offers, api):
@@ -926,5 +1278,5 @@ def solve(world, api, config, route_fn):
             previous_packet = payload
             return bind_refund_items(result)
 
-        return supplied_agent(world, SimpleNamespace(json=interpret), config, route_fn)
+        return run_timely_hybrid(world, SimpleNamespace(json=interpret), config, route_fn)
     return supplied_agent(world, api, config, route_fn)
