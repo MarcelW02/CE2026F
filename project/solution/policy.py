@@ -706,29 +706,44 @@ def route(observation, memory):
 
 
 LIMITS_NOTE = (
-    "\nYour previous reply was rejected by the published expression validator: {error} "
+    "\nYour previous reply was rejected by the published validator: {error} "
     "Return the same contract as a valid object: every expression has depth at most 12 and at most 128 nodes, "
     "at most two nested exists/minimum quantifiers, item only inside exists or minimum, and numeric results for "
-    "budget_limit and arrival_deadline (refunds may be null). Keep every stated condition."
+    "budget_limit and arrival_deadline (refunds may be null). Every observed offer ID appears in exactly one "
+    "refund group. Keep every stated condition."
 )
 
 
-def expression_problem(result):
-    """The framework validator's objection to any compiled expression, or None when all are valid.
+def expression_problem(result, offers):
+    """The framework validator's objection to a compiled result, or None when the planner can use it.
 
-    The supplied planner validates expressions only when it first evaluates them, so an invalid one ends the
-    episode. Checking before planning lets an invalid local or scoped result fall back to the full interpreter,
-    and an invalid full reply get one bounded repair request naming the validator's error.
+    The supplied planner normalises a reply (refund groups, facts, expressions) only after it is returned, so an
+    invalid one ends the episode. Running the same normalisation first lets an invalid local or scoped result fall
+    back to the full interpreter, and an invalid full reply get one bounded repair request naming the error.
     """
+    from framework.contract_interpreter import normalize_response
     try:
-        for key in ("budget_limit", "arrival_deadline"):
-            if key in result:
-                validate_expression(result[key], result_kind="number")
-        for group in result.get("refund_groups", []):
-            validate_expression(group["retained"], result_kind="refund")
+        normalize_response(result, offers)
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         return str(error) or type(error).__name__
     return None
+
+
+def deduplicated_groups(result, offers):
+    """Last resort after the repair: each observed offer in its first group only, unknown IDs dropped, and any
+    omitted offer treated as locked (null: no refund), the most conservative reading of an unread term."""
+    observed, seen, groups = [offer["id"] for offer in offers], set(), []
+    for group in result.get("refund_groups") or []:
+        identifiers = []
+        for identifier in group.get("offer_ids", []) if isinstance(group, dict) else []:
+            if identifier in observed and identifier not in seen:
+                seen.add(identifier)
+                identifiers.append(identifier)
+        if identifiers:
+            groups.append(dict(group, offer_ids=identifiers))
+    if missing := [identifier for identifier in observed if identifier not in seen]:
+        groups.append(dict(offer_ids=missing, retained=None))
+    return dict(result, refund_groups=groups)
 
 
 def solve(world, api, config, route_fn):
@@ -761,13 +776,16 @@ def solve(world, api, config, route_fn):
                 result = compile_partially(api, settings, instructions, payload, label, previous_packet)
                 if result is not None and (refunds := read_weather_refunds(payload)):
                     result = dict(result, refund_groups=refunds)
-            if result is None or expression_problem(result):
+            offers = payload["offers"]
+            if result is None or expression_problem(result, offers):
                 # An invalid local or scoped result is not planned with: the full interpreter compiles it instead.
                 result, full = full_interpretation(settings, instructions, payload, schema, label), True
-            if full and (error := expression_problem(result)):
+            if full and (error := expression_problem(result, offers)):
                 # One bounded repair of a content mistake, naming the validator's objection.
                 result = full_interpretation(settings, instructions + LIMITS_NOTE.format(error=error), payload, schema,
                                              dict(label, attempt="limits_repair"))
+                if expression_problem(result, offers) and not expression_problem(deduplicated_groups(result, offers), offers):
+                    result = deduplicated_groups(result, offers)
             previous_packet = payload
             return result
 
