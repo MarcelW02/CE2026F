@@ -15,7 +15,7 @@ ARCHITECTURE = "hybrid_single"
 REFRESH_CONTEXT = True
 CONCURRENT_INVESTIGATORS = True
 ROUTE_THRESHOLD = 1
-MAX_DECISIONS = 30  # planner loop rounds (no API cost); 12 left Reactive/Forecast episodes with one or two spare
+MAX_DECISIONS = 12
 FORECAST_STRATEGY = "precaution"  # precaution, cheapest, or flexible
 
 

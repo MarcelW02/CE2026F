@@ -5,44 +5,18 @@ all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
-from framework.contract_interpreter import (INSTRUCTIONS as CONTRACT_INSTRUCTIONS, compile_contract, make_schema,
-                                            role_source_ids)
-from framework.contract_policy import Controller, action
-from .prompts import PROJECT_PARTS, PROJECT_PROMPT
+from framework.contract_interpreter import INSTRUCTIONS as CONTRACT_INSTRUCTIONS, make_schema
 from copy import deepcopy
 import json
 import re
 from types import SimpleNamespace
 
 
-# The full call compiles every rule from unfamiliar text in one reply. At effort low, 25-30% of these replies
-# came back with no reasoning at all, and those carried the misreadings; at medium none did (0 of 128) and
-# every forced-full episode passed (61/61) for about 25% more per call. Scoped calls stay at the configured effort.
-FULL_CALL_EFFORT = "medium"
-
-
-def compact_full_request(instructions, payload, schema):
-    """The full fallback call with the scoped call's compact parts: on unfamiliar cases this call carries most cost.
-
-    Instructions cover exactly the schema's keys and facts (consent and waiver included), the grammar is the lean
-    one with booking.* kept for refund rules, and offers keep the fields a contract can reference.
-    """
-    if instructions != CONTRACT_INSTRUCTIONS + "\n" + PROJECT_PROMPT or "$defs" not in schema:
-        return instructions, payload, schema
-    properties = schema["properties"]
-    keys = [key for key in ("budget_limit", "arrival_deadline", "refund_groups") if key in properties]
-    fact_keys = [key for key in properties.get("facts", {}).get("properties", {}) if key in FACT_NOTES]
-    instructions = scoped_instructions(instructions, keys, fact_keys, complete=True)
-    schema = dict(schema, **{"$defs": lean_definitions(schema["$defs"], keep_booking=True)})
-    payload = dict(payload, offers=[{key: offer[key] for key in OFFER_KEYS if key in offer} for offer in payload["offers"]])
-    return instructions, payload, schema
-
-
 def interpret_with_consent_references(api, settings, instructions, payload, schema, label):
+    settings = dict(settings, effort="medium")
     observation = {key: payload["observation"][key]
                    for key in ("virtual_minute", "tier", "notices", "operational_sources")}
     payload = dict(payload, observation=observation)
-    instructions, payload, schema = compact_full_request(instructions, payload, schema)
     notices = payload["observation"]["notices"]
     # shortcut: alias the standard consent format, extend coverage if other formats cause copying errors.
     token_pattern = r"\bconsent-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b"
@@ -432,164 +406,16 @@ def read_weather_refunds(payload):
 CONSENT_TOKEN = r"\bconsent-[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\b"
 TRAVELER_FACTS = ("preferred", "requires_step_free", "avoid_carriers")
 WEATHER_FACTS = ("weather", "forecasts")
-FACT_ORDER = ("consent", *TRAVELER_FACTS, "transfer", "waiver", *WEATHER_FACTS)
+FACT_ORDER = (*TRAVELER_FACTS, "transfer", "waiver", *WEATHER_FACTS)
 UPDATE_KINDS = {"user_update", "forecast_update", "weather_update"}
-NEUTRAL_KINDS = {"provider_notice", "stock_update", "sellout"}  # inventory and procedure notices: no contract terms
-SOURCE_KINDS = {"transport_update", "document_update"}  # the changed transport-guide or hotel-bulletin carries the terms
-WEATHER_KINDS = {"forecast_update", "weather_update"}
 NOTICE_TOPICS = (
     ("budget_limit", r"\b(?:spend|allowance|ceiling|budget|USD|supplement|payment)"),
     ("arrival_deadline", r"\b(?:arriv|deadline|appointment|meeting|registration|check-in|client by)"),
     ("transfer", r"\btransfer"),
     ("waiver", r"\b(?:hotel|waiver|bulletin)"),
 )
-TRAVELER_TOPIC = (r"\b(?:carriers?|airlines?|operators?|step[- ]free|access\w*|wheelchair|prefer\w*|avoid\w*|"
-                  r"exclud\w*|permitted|no longer (?:use|fly|take|travel)|(?:cannot|can't|must not|may not) "
-                  r"(?:use|fly|take|travel)|rail|flying)\b")
-CLOCK_TOPIC = r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\bneeds? me\b"
-CONTINUES = re.compile(r"\b(?:continues?|unchanged|unaffected|remains?|stays?|stand|still appl(?:y|ies)|keep|retain|"
-                       r"(?:have|has|had) not (?:been )?changed|not changed|as (?:they|it) (?:was|were))\b", re.IGNORECASE)
-CHANGE_WORD = re.compile(r"\b(?:now|new|newly|replac\w*|no longer|only|instead|mov\w*|chang\w*|reduc\w*|rais\w*|"
-                         r"increas\w*|lower\w*|extend\w*|withdraw\w*|revis\w*|updat\w*|amend\w*|except\w*)\b",
-                         re.IGNORECASE)
-CLAUSE_SPLIT = re.compile(r"[;!?]|[.:](?!\d)|\b(?:but|while|however|although|except)\b", re.IGNORECASE)
-
-
-def restates_only(clause):
-    """A clause that says a rule continues, with no figure and no change word outside that statement."""
-    return bool(CONTINUES.search(clause)) and not re.search(r"\d", clause) \
-        and not CHANGE_WORD.search(CONTINUES.sub(" ", clause))
-
-
-def update_topics(text, carriers):
-    """Contract keys (and 'traveler') that some clause of an update may amend."""
-    topics = set()
-    patterns = (*NOTICE_TOPICS, ("arrival_deadline", CLOCK_TOPIC), ("traveler", TRAVELER_TOPIC))
-    for clause in CLAUSE_SPLIT.split(text):
-        if any(re.search(rf"\b{re.escape(carrier)}\b", clause) for carrier in carriers):
-            topics.add("traveler")
-        if restates_only(clause):
-            continue
-        topics.update(key for key, pattern in patterns if re.search(pattern, clause, re.IGNORECASE))
-    return topics
-
-
 OFFER_KEYS = ("id", "mode", "price", "carrier", "step_free", "arrival_minute", "weather_exposed",
               "available_from", "expires_at", "hold_fee_usd", "change_policy", "cancel_fee_usd")
-
-
-WEATHER_EVENT_KINDS = {"forecast_update", "weather_update"}
-STAMP_NUMBER = re.compile(r"(?:\bminute|\bversion)\s+$", re.IGNORECASE)
-DELAY_PATTERNS = (re.compile(r"\b(\d+)[- ]minutes?\s+delay", re.IGNORECASE),
-                  re.compile(r"\bdelay(?:ed)?\s+(?:of\s+|by\s+)?(\d+)\s+minutes?\b", re.IGNORECASE))
-ON_TIME = re.compile(r"\bon time\b", re.IGNORECASE)
-HEDGE = re.compile(r"\b(?:possible|possibly|may|might|could|estimated?|uncertain|unresolved|expected|likely|chance|"
-                   r"risk|preliminary|provisional|so far|further|next report|at least|up to|forecasts? (?:a|an))\b|%",
-                   re.IGNORECASE)
-REALIZED = re.compile(r"\b(?:actual|actually|observed|realized|realised|final operating|operating (?:result|outcome|report)|"
-                      r"confirms?|confirmed)\b", re.IGNORECASE)
-STILL_OPEN = re.compile(r"\b(?:remains?|still|is still)\s+(?:uncertain|unresolved|open|possible)\b", re.IGNORECASE)
-SETTLED = re.compile(r"\b(?:did not|has not|have not|not occur|on time|resolved|realized|realised|confirms?|confirmed|"
-                     r"delayed by|observed|cancelled|canceled)\b", re.IGNORECASE)
-
-
-def mentioned_modes(texts):
-    return {mode for mode in ("flight", "train", "coach")
-            for text in texts if re.search(rf"\b{mode}(?:e?s)?\b", text, re.IGNORECASE)}
-
-
-def free_numbers(text):
-    """Numbers that are neither clock stamps (minute N) nor document versions."""
-    return [(match.start(), int(match[0])) for match in re.finditer(r"\d+", text)
-            if not STAMP_NUMBER.search(text[:match.start()])]
-
-
-def unversioned_numbers(text):
-    return [int(match[0]) for match in re.finditer(r"\d+", text)
-            if not re.search(r"\bversion\s+$", text[:match.start()], re.IGNORECASE)]
-
-
-def reported_delay(text):
-    """The single realized delay a report states, or None when any figure is unexplained."""
-    delays = {}
-    for pattern in DELAY_PATTERNS:
-        for match in pattern.finditer(text):
-            delays[match.start(1)] = int(match[1])
-    if any(position not in delays for position, _ in free_numbers(text)):
-        return None
-    values = set(delays.values()) | ({0} if ON_TIME.search(text) else set())
-    return values.pop() if len(values) == 1 else None
-
-
-def read_weather_event(new_notices, forecast, earlier_forecast, facts):
-    """Read a pure forecast or operating update locally; None defers it to the interpreter.
-
-    Two forms are supported in any wording: a forecast that stays open with no new figure,
-    and one realized delay for a single forecast mode. Anything else goes to the model.
-    """
-    if not new_notices or any(notice["kind"] not in WEATHER_EVENT_KINDS for notice in new_notices):
-        return None
-    announced = {row["mode"] for row in facts.get("forecasts") or []}
-    texts = [notice["text"] for notice in new_notices]
-    if forecast is not None and forecast != earlier_forecast:
-        texts.append(forecast["text"])
-    modes = mentioned_modes(texts)
-    if not announced or not modes <= announced:
-        return None
-    joined = " ".join(texts)
-    if STILL_OPEN.search(joined) and not SETTLED.search(joined):
-        # An open forecast may restate earlier figures, but any new number could be a changed estimate or report time.
-        known = set(unversioned_numbers(earlier_forecast["text"])) if earlier_forecast else set()
-        if all(value in known for text in texts for value in unversioned_numbers(text)):
-            return {"weather": deepcopy(facts["weather"]), "forecasts": deepcopy(facts["forecasts"])}
-        return None
-    if len(modes) != 1 or HEDGE.search(joined) or not REALIZED.search(joined):
-        return None
-    delays = {reported_delay(text) for text in texts}
-    if None in delays or len(delays) != 1:
-        return None
-    mode = modes.pop()
-    weather = dict(facts["weather"], **{mode: delays.pop()})
-    return {"weather": weather, "forecasts": [deepcopy(row) for row in facts["forecasts"] if row["mode"] != mode]}
-
-
-UNUSED_FIELDS = ("held_at", "confirmed_at", "status", "change_policy", "cancel_fee_usd", "available_from", ".id")
-UNUSED_VARIABLES = {"candidate.expires_at", "booking.expires_at", "state.total_refunds", "state.uncredited_hold_deposits",
-                    "state.retained_hold_fees", "state.total_retained_loss", "state.hotel_fee"}
-
-
-def lean_definitions(definitions, keep_booking):
-    """The supplied expression grammar without the forms and names no scoped call has used.
-
-    Across 1,862 recorded outputs, the predicate/value-level `if`, `in`, list values and the listed timestamp,
-    status, base-fare and ledger-subtotal names never or almost never appeared; booking.* is empty before
-    purchase, so only refund requests keep it. The schema is about a third of each request's input. Every
-    output of the lean grammar is still valid under the supplied one.
-    """
-    definitions = deepcopy(definitions)
-
-    def operator(branch):
-        return branch.get("properties", {}).get("op", {}).get("enum", [])
-
-    definitions["predicate"]["anyOf"] = [branch for branch in definitions["predicate"]["anyOf"]
-                                         if not {"in", "if"} & set(operator(branch))]
-    definitions["value"]["anyOf"] = [branch for branch in definitions["value"]["anyOf"]
-                                     if branch.get("type") != "array" and "if" not in operator(branch)]
-
-    def prune(node):
-        if isinstance(node, dict):
-            names = node.get("enum")
-            if names and all(isinstance(name, str) and "." in name for name in names):
-                node["enum"] = [name for name in names if not name.endswith(UNUSED_FIELDS) and name not in UNUSED_VARIABLES
-                                and (keep_booking or not name.startswith("booking."))]
-            for value in node.values():
-                prune(value)
-        elif isinstance(node, list):
-            for value in node:
-                prune(value)
-
-    prune(definitions)
-    return definitions
 
 
 def strict_object(properties):
@@ -681,101 +507,20 @@ def read_local_facts(request, documents):
     return facts, asks
 
 
-SCOPED_INTRO = (
-    "You compile currently observed travel contract fields into the typed object required by the response schema. "
-    "You do not grade, choose an offer, or infer future events. Interpret ordinary English scope, exceptions, "
-    "amendments and inequalities exactly. Preserve unamended conditions. The current authoritative source versions "
-    "supersede earlier text only for their stated scope. A forecast is a possibility, never realized weather."
-)
-SCOPE_NOTE = ("This request asks only for the keys in its schema; every other field is already compiled, and unrelated "
-              "documents and offers are omitted.")
-FACT_NOTES = {
-    "consent": "consent: the literal approval token for the lead outbound; consent covers the lead outbound only.",
-    "preferred": "preferred: the preferred mode.",
-    "requires_step_free": "requires_step_free: whether step-free access is required.",
-    "avoid_carriers": "avoid_carriers: excluded carrier names. Ordinary access/carrier facts apply to the current trip.",
-    "transfer": "transfer: minutes per mode added to terminal arrival to reach the client.",
-    "waiver": "waiver: topic, code and version of the current hotel bulletin's actual evidence, not archived examples.",
-    "weather": "weather: realized delay minutes per mode only, zero before realization.",
-    "forecasts": ("forecasts: explicitly announced possible weather delays. Its at is the virtual minute of the "
-                  "upcoming final operating report or uncertainty resolution, not the forecast's issue/revision time "
-                  "or a backup sales cutoff. Use null for an unstated report time, delay or probability."),
-}
-EXPRESSION_NOTES = (
-    "Expressions use the schema's forms; if branches short-circuit; ordering "
-    "requires numbers. exists and minimum bind item to each pool object without changing outer candidate/booking; "
-    "minimum returns the least value over matching items, else its default.\n"
-    "candidate is the proposed offer or hold at purchase and the active booking when checking arrival; booking is "
-    "empty before purchase. At cancellation both are the cancelled booking. now is action COMPLETION minute. "
-    "meeting_arrival is terminal arrival plus current transfer. Missing optional object fields are null. offers is "
-    "current unheld on-sale inventory plus a candidate's valid held offer; holds is all live holds. State amounts are "
-    "actual current ledger amounts; retained_fees means cancellation retention only. Quoted fare price already "
-    "includes any reservation deposit credited when confirmed."
-)
-EXPRESSION_RULES = (
-    "Do not encode a preferred/optimal offer ID, read case IDs as clues, guess hidden schedules, translate conditions "
-    "into unexplained booleans, or return prose instead of expressions. Keep every threshold and exception inside its "
-    "proper conditional scope. Compile from source text, using previous interpretation only to preserve facts not "
-    "amended by current evidence."
-)
-REFUND_RULES = (
-    "Reference offer IDs only to map refund expressions to observed tickets. Base numeric change_policy/cancel_fee_usd "
-    "are ordinary terms; conditional prose overrides them. For ordinary fee fares with no exceptions the refund "
-    "expression is the numeric base retention; flexible is 0 and locked is null."
-)
-CEILING_RULE = "All monetary ceilings are total spending, unless the prose explicitly compares prices inside a condition."
-
-
-def scoped_instructions(instructions, keys, fact_keys, complete=False):
-    """Instructions for only the requested keys; the strict schema already fixes the expression grammar.
-
-    complete=True serves the full fallback call, which asks for every key and fact itself.
-    """
-    if instructions != CONTRACT_INSTRUCTIONS + "\n" + PROJECT_PROMPT:
+def scoped_instructions(instructions, keys, fact_keys):
+    if not instructions.startswith(CONTRACT_INSTRUCTIONS):
         return instructions
-    outputs, ceiling = CONTRACT_INSTRUCTIONS.split("\n\nOutput object keys:\n", 1)[1].split("\n\n")[:2]
-    key_lines = {line.split(":")[0]: line for line in outputs.split("\n")}
-    lines = [key_lines[key] for key in keys]
-    if fact_keys:
-        lines.append("facts: " + " ".join(FACT_NOTES[key] for key in fact_keys))
-    parts = [SCOPED_INTRO if complete else SCOPED_INTRO + " " + SCOPE_NOTE, "Output object keys:\n" + "\n".join(lines)]
+    intro, rest = CONTRACT_INSTRUCTIONS.split("\n\nOutput object keys:\n", 1)
+    outputs, ceiling, language, rules = rest.split("\n\n")
+    lines = [line for line in outputs.split("\n")
+             if line.split(":")[0] in keys or (fact_keys and (line.startswith("facts:") or line.startswith("Transfer values")))]
+    parts = [intro, "Output object keys:\n" + "\n".join(lines)]
     if "budget_limit" in keys:
         parts.append(ceiling)
     if keys:
-        rules = [EXPRESSION_RULES]
-        rules += [REFUND_RULES] if "refund_groups" in keys else []
-        rules += [CEILING_RULE] if "budget_limit" in keys else []
-        parts += [EXPRESSION_NOTES, " ".join(rules)]
-    project = ["intro"] + [name for name in ("consent", "waiver") if name in fact_keys] + ["amendments"]
-    project += ["exceptions"] if keys else []
-    parts.append("\n".join(PROJECT_PARTS[name] for name in project))
-    return "\n\n".join(parts)
-
-
-def early_notice_asks(notices, carriers):
-    """Fields that notices received before the first interpretation may have amended.
-
-    Sources revised by these notices are already read in their current version, so local readers see them; what
-    they cannot see is a change stated only in a message, so user updates are routed by topic (all rules when no
-    topic is recognisable), and weather, transfer and waiver notices ask their own facts.
-    """
-    asks = set()
-    updates = " ".join(notice["text"] for notice in notices if notice["kind"] == "user_update")
-    if updates:
-        topics = update_topics(updates, carriers) | {"traveler"}
-        if topics == {"traveler"}:
-            topics |= {"budget_limit", "arrival_deadline"}
-        asks |= set(TRAVELER_FACTS) | (topics - {"traveler"})
-    kinds = {notice["kind"] for notice in notices}
-    if kinds & WEATHER_KINDS:
-        asks |= set(WEATHER_FACTS)
-    if "transport_update" in kinds:
-        asks.add("transfer")
-    if "document_update" in kinds:
-        asks.add("waiver")
-    if any(re.search(CONSENT_TOKEN, notice["text"]) for notice in notices):
-        asks.add("consent")
-    return asks
+        parts += [language, rules.rstrip("\n")]
+    return ("\n\n".join(parts) + "\nThis request asks only for the keys in its schema; every other field is "
+            "already compiled, and unrelated documents and offers are omitted." + instructions[len(CONTRACT_INSTRUCTIONS):])
 
 
 def compile_partially(api, settings, instructions, payload, label, previous_packet):
@@ -789,68 +534,46 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
     fare_ids = {(offer.get("refund_contract_source") or {}).get("id") for offer in offers}
     known_ids = {budget_id, arrival_id, "traveler-profile", "transport-guide", "hotel-terms", "hotel-bulletin",
                  "weather-forecast"} | fare_ids
-    if not offers or None in fare_ids:
+    if not offers or None in fare_ids or not set(documents) <= known_ids:
         return None
-    # Extra sources (an agenda, a linked note) are context: sent along with any expression request, and an
-    # authority that links one is always interpreted, because the local readers see only the authority itself.
-    extra_ids = set(documents) - known_ids
-    linked = {key for key, source_id in (("budget_limit", budget_id), ("arrival_deadline", arrival_id))
-              if set(documents.get(source_id, {}).get("related", [])) & extra_ids}
     asks, refunds = set(), {}
     contract = {}
-    accepted = UPDATE_KINDS | NEUTRAL_KINDS | SOURCE_KINDS
-    carriers = {offer["carrier"] for offer in offers if offer.get("carrier")}
     if previous is None:
-        if not notices or notices[0]["kind"] != "initial_request" or any(n["kind"] not in accepted for n in notices[1:]):
+        if len(notices) != 1 or notices[0]["kind"] != "initial_request":
+            return None
+        tokens = set(re.findall(CONSENT_TOKEN, notices[0]["text"]))
+        if len(tokens) != 1:
             return None
         facts, asks = read_local_facts(notices[0]["text"], documents)
-        tokens = set(re.findall(CONSENT_TOKEN, notices[0]["text"]))
-        if len(tokens) == 1:
-            facts["consent"] = tokens.pop()
-        else:
-            asks.add("consent")  # another approval format, or several tokens: the model picks the lead's approval
+        facts["consent"] = tokens.pop()
         for key, source_id, reader in (("budget_limit", budget_id, read_spending_limit),
                                        ("arrival_deadline", arrival_id, read_arrival)):
-            value = reader(documents[source_id]["text"]) if source_id in documents and key not in linked else None
+            value = reader(documents[source_id]["text"]) if source_id in documents else None
             if value is None:
                 asks.add(key)
             contract[key] = value
-        # Notices that arrived before this first interpretation are read as updates in the same scoped call.
-        asks |= early_notice_asks(notices[1:], carriers)
         pending_offers = offers
     else:
         if previous_packet is None or "refund_terms" not in previous:
             return None
         old_notices = previous_packet["observation"]["notices"]
         new = notices[len(old_notices):]
-        if notices[:len(old_notices)] != old_notices or any(notice["kind"] not in accepted for notice in new):
+        if notices[:len(old_notices)] != old_notices or any(
+                notice["kind"] not in UPDATE_KINDS or re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
             return None
-        if any(re.search(CONSENT_TOKEN, notice["text"]) for notice in new):
-            asks.add("consent")  # a notice naming an approval token: recheck which approval applies
         old_documents = {source["id"]: source for source in previous_packet["documents"]}
         changed = {source_id for source_id in set(documents) | set(old_documents)
                    if documents.get(source_id) != old_documents.get(source_id)}
         old_sources = previous_packet["observation"]["operational_sources"]
-        # A reference source first read after boot is newly seen context, not an amendment; a revised one is.
-        changed -= {source_id for source_id in changed - known_ids if source_id not in old_documents}
         if changed - known_ids:
-            return None  # a revised source of unknown scope: interpret everything
+            return None
         updates = " ".join(notice["text"] for notice in new if notice["kind"] == "user_update")
         if updates:
-            carriers |= set(previous["facts"].get("avoid_carriers") or [])
-            topics = update_topics(updates, carriers)
-            for source_id in changed - {"weather-forecast"}:
-                if source_id in documents and "traveler" in update_topics(documents[source_id]["text"], carriers):
-                    topics.add("traveler")
             if not changed:
-                # The message itself carries the change: always recheck traveller facts, and every rule
-                # when no topic is recognisable.
-                topics.add("traveler")
-                if topics == {"traveler"}:
-                    topics |= {"budget_limit", "arrival_deadline"}
-            asks.update(TRAVELER_FACTS if "traveler" in topics else ())
-            asks.update(topics - {"traveler"})
-        if any(notice["kind"] in WEATHER_KINDS for notice in new) or "weather-forecast" in changed:
+                return None
+            asks.update(TRAVELER_FACTS)
+            asks.update(key for key, pattern in NOTICE_TOPICS if re.search(pattern, updates, re.IGNORECASE))
+        if any(notice["kind"] != "user_update" for notice in new) or "weather-forecast" in changed:
             asks.update(WEATHER_FACTS)
         for key, source_id in (("budget_limit", budget_id), ("arrival_deadline", arrival_id)):
             if source_id in changed or sources[key] != old_sources.get(key):
@@ -863,12 +586,6 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
         if changed & {"hotel-terms", "hotel-bulletin"}:
             asks.add("waiver")
         facts = deepcopy(previous["facts"])
-        if asks & set(WEATHER_FACTS) and changed <= {"weather-forecast"}:
-            weather = read_weather_event(new, documents.get("weather-forecast"),
-                                         old_documents.get("weather-forecast"), facts)
-            if weather is not None:
-                facts.update(weather)
-                asks -= set(WEATHER_FACTS)
         old_references = {offer["id"]: offer.get("refund_contract_source") for offer in previous_packet["offers"]}
         pending_offers = []
         for offer in offers:
@@ -902,8 +619,6 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
             wanted |= {"hotel-terms", "hotel-bulletin"}
         if asks & set(WEATHER_FACTS):
             wanted.add("weather-forecast")
-        if asks & {"budget_limit", "arrival_deadline"}:
-            wanted |= extra_ids
         scoped_documents = [deepcopy(source) for source in payload["documents"]
                             if source["id"] in wanted and source["id"] not in pending]
         for source_id, identifiers in pending.items():
@@ -931,16 +646,11 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
                                                  for key in fact_keys})
         schema = strict_object(properties)
         if expression_keys:
-            schema["$defs"] = lean_definitions(full["$defs"], keep_booking="refund_groups" in expression_keys)
+            schema["$defs"] = deepcopy(full["$defs"])
         response = api.json(settings, scoped_instructions(instructions, expression_keys, fact_keys),
                             scoped, schema, label)
         contract.update({key: response[key] for key in ("budget_limit", "arrival_deadline") if key in response})
         facts.update(response.get("facts", {}))
-        if "consent" in fact_keys:
-            # The approval must be copied literally from a notice; anything else goes to the full interpreter.
-            consent = str(facts.get("consent") or "").strip()
-            if not consent or not any(re.search(rf"(?<![\w-]){re.escape(consent)}(?![\w-])", notice["text"]) for notice in notices):
-                return None
         for group in response.get("refund_groups", []):
             for identifier in group["offer_ids"]:
                 if identifier in refunds or identifier not in pending_ids:
@@ -954,466 +664,6 @@ def compile_partially(api, settings, instructions, payload, label, previous_pack
         groups[json.dumps(expression, sort_keys=True)]["offer_ids"].append(identifier)
     return {"budget_limit": contract["budget_limit"], "arrival_deadline": contract["arrival_deadline"],
             "refund_groups": list(groups.values()), "facts": facts}
-
-
-def bind_free_items(expression, inside=False, root="booking"):
-    """Rename item.* outside exists/minimum to the only ticket in scope.
-
-    No pool object is bound there: in a refund rule that ticket is the cancelled booking, and in a spending or
-    arrival rule it is the candidate being purchased or checked.
-    """
-    if isinstance(expression, list):
-        return [bind_free_items(value, inside, root) for value in expression]
-    if not isinstance(expression, dict):
-        return expression
-    if expression.get("op") in ("exists", "minimum"):
-        return {key: bind_free_items(value, inside or key in ("where", "value"), root) for key, value in expression.items()}
-    variable = expression.get("var")
-    if not inside and set(expression) == {"var"} and isinstance(variable, str) and variable.startswith("item."):
-        return {"var": root + "." + variable[len("item."):]}
-    return {key: bind_free_items(value, inside, root) for key, value in expression.items()}
-
-
-def mentions(expression, *roots):
-    if isinstance(expression, dict):
-        return (isinstance(expression.get("var"), str) and expression["var"].split(".")[0] in roots) or any(
-            mentions(value, *roots) for value in expression.values())
-    return isinstance(expression, list) and any(mentions(value, *roots) for value in expression)
-
-
-def is_liveness_test(expression):
-    """Expiry-versus-now or a status test on item: always settled inside the live-holds pool."""
-    if not isinstance(expression, dict):
-        return False
-    sides = {json.dumps(expression.get("left")), json.dumps(expression.get("right"))}
-    if expression.get("op") in ("lt", "le", "gt", "ge"):
-        return sides == {json.dumps({"var": "item.expires_at"}), json.dumps({"var": "state.now"})}
-    return (expression.get("op") in ("eq", "ne", "in") and json.dumps({"var": "item.status"}) in sides)
-
-
-def says_expired(expression):
-    """item.expires_at < / <= state.now (or the mirrored form): a hold that has already expired."""
-    if not isinstance(expression, dict) or expression.get("op") not in ("lt", "le", "gt", "ge"):
-        return False
-    left, right = json.dumps(expression.get("left")), json.dumps(expression.get("right"))
-    expires, now = json.dumps({"var": "item.expires_at"}), json.dumps({"var": "state.now"})
-    return (expression["op"] in ("lt", "le") and (left, right) == (expires, now)) or (
-        expression["op"] in ("gt", "ge") and (left, right) == (now, expires))
-
-
-def contains(expression, predicate):
-    if predicate(expression):
-        return True
-    if isinstance(expression, dict):
-        return any(contains(value, predicate) for value in expression.values())
-    return isinstance(expression, list) and any(contains(value, predicate) for value in expression)
-
-
-def price_minimums(expression, in_holds=False):
-    """Normalize two degenerate quantifier forms.
-
-    A minimum whose properly bound filter uses item but whose value is a constant means the item's price (fares).
-    Inside the holds pool every item is a live hold, so an expiry-versus-now comparison there is redundant; an
-    inverted one would wrongly require an expired hold, so it is replaced by true.
-    """
-    if isinstance(expression, list):
-        return [price_minimums(value, in_holds) for value in expression]
-    if not isinstance(expression, dict):
-        return expression
-    if in_holds and is_liveness_test(expression):
-        return True
-    if (expression.get("op") == "if" and contains(expression.get("when"), says_expired)
-            and type(expression.get("then")) in (int, float) and type(expression.get("else")) in (int, float)
-            and expression["then"] > expression["else"]):
-        # An "expired hold" test whose branch retains more than the alternative: the model inverted both the test
-        # and the branches. Holding a replacement never raises retention, so repairing only the test would invert
-        # the rule; this condition is left as written.
-        return {key: (value if key == "when" else price_minimums(value, in_holds)) for key, value in expression.items()}
-    pool_holds = expression.get("op") in ("exists", "minimum") and expression.get("pool") == "holds"
-    result = {key: price_minimums(value, pool_holds if key in ("where", "value") else in_holds)
-              for key, value in expression.items()}
-    if (result.get("op") == "minimum" and mentions(result.get("where"), "item")
-            and not mentions(result.get("value"), "item", "candidate", "booking")):
-        result["value"] = {"var": "item.price"}
-    return result
-
-
-def bind_refund_items(result):
-    if not isinstance(result, dict):
-        return result
-    result = dict(result, **{key: price_minimums(bind_free_items(result[key], root="candidate"))
-                             for key in ("budget_limit", "arrival_deadline") if key in result})
-    if not isinstance(result.get("refund_groups"), list):
-        return result
-    groups = [dict(group, retained=price_minimums(bind_free_items(group["retained"])))
-              if isinstance(group, dict) and "retained" in group else group for group in result["refund_groups"]]
-    return dict(result, refund_groups=groups)
-
-
-WAIVER_TYPE = re.compile(r"\b[a-z]+(?:-[a-z]+)*-(?:reference|letter|receipt|notice|record|confirmation)\b")
-SUPERSEDED_EVIDENCE = re.compile(r"\b(?:archive|archived|withdrawn|previous|former|earlier|old|last year|another room|"
-                                 r"no longer|expired|example)\b", re.IGNORECASE)
-SELLOUT_WARNING = re.compile(r"\b(trip-[\w-]*\w)\b[^.]*?\b(?:virtual )?minute (\d+)", re.IGNORECASE)
-
-
-def bulletin_waiver(source):
-    """Claim arguments when a bulletin names exactly one evidence type and proof code; otherwise None."""
-    if not source:
-        return None
-    text = source["text"]
-    codes = set(re.findall(r"\bproof-[\w-]*\w", text))
-    types = set(WAIVER_TYPE.findall(text))
-    versions = {int(value) for value in re.findall(r"\bversion\s+(\d+)", text, re.IGNORECASE)}
-    if len(codes) != 1 or len(types) != 1 or versions - {source["version"]} or SUPERSEDED_EVIDENCE.search(text):
-        return None
-    return dict(topic=types.pop(), code=codes.pop(), version=source["version"])
-
-
-def bulletin_cutoff(source):
-    """The earliest 'before (virtual) minute N' the bulletin states, or None."""
-    minutes = [int(value) for value in re.findall(r"\bbefore (?:virtual )?minute (\d+)", (source or {}).get("text", ""),
-                                                  re.IGNORECASE)]
-    return min(minutes) if minutes else None
-
-
-def waiver_key(waiver):
-    return (waiver.get("topic"), waiver.get("code"), waiver.get("version"))
-
-
-class TimelyController(Controller):
-    """The framework planner with faster first service; offer choice, budgets and refunds are unchanged.
-
-    With three tool slots, the supplied boot reads every source (6 minutes), then claims the waiver alone
-    (2 minutes), then holds and confirms. Any notice before minute 8 adds a 2-minute refresh, so the first
-    confirmation lands after the minute-12 deadline, and a Forecast recovery hold misses its sales cutoff.
-    This controller (1) claims during the boot reads when the bulletin evidence is unambiguous, using the slot
-    those reads leave idle; (2) otherwise claims and holds the first planned booking in one batch, planning as
-    if the claim succeeds; (3) retries a failed or superseded claim with the current interpreted evidence; and
-    (4) treats a warned sellout minute as that offer's sales cutoff, so preparation holds it in time.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.claimed = set()
-
-    def batch(self, actions):
-        results = super().batch(actions)
-        # A stock warning names when unheld inventory disappears; plan as if sales close then.
-        for notice in self.world.observe()["notices"]:
-            if notice["kind"] == "stock_update":
-                for identifier, minute in SELLOUT_WARNING.findall(notice["text"]):
-                    if identifier in self.offers:
-                        self.offers[identifier]["expires_at"] = min(self.offers[identifier]["expires_at"], int(minute))
-        return results
-
-    def claim(self, waiver):
-        self.claimed.add(waiver_key(waiver))
-        return action("claim", topic=waiver["topic"], code=waiver["code"], version=waiver["version"])
-
-    def pending_reads(self, observation, everything=False):
-        """Reads for revised sources already held, plus unread sources the contract may depend on (or all)."""
-        needed = None if everything else self.boot_sources(observation)
-        return [action("read", id=source["id"]) for source in observation["source_catalog"]
-                if (source["id"] in self.documents and self.documents[source["id"]]["version"] != source["version"])
-                or (source["id"] not in self.documents and (needed is None or source["id"] in needed))]
-
-    def refresh(self, initial=False):
-        if not initial:
-            # As supplied (search alongside source reads, then interpret), but unlinked reference material is left
-            # for idle time instead of delaying the reaction to a notice.
-            self.batch([action("search")] + self.pending_reads(self.world.observe()))
-            self.interpret_observed(boot=True)
-            return
-        # As supplied: hotel-terms first, because it links the bulletin into the catalog.
-        observation = self.world.observe()
-        first = [action("search")]
-        if any(source["id"] == "hotel-terms" for source in observation["source_catalog"]):
-            first.append(action("read", id="hotel-terms"))
-        spend_source = observation["operational_sources"]["budget_limit"]["id"]
-        if spend_source != "hotel-terms":
-            first.append(action("read", id=spend_source))
-        self.batch(first)
-        # Then the bulletin leads the next round, so the round after it can carry the claim. Only sources the
-        # contract can depend on are read before the first booking (see boot_sources); others follow later.
-        observation = self.world.observe()
-        pending = sorted((action("read", id=source["id"]) for source in observation["source_catalog"]
-                          if source["id"] in self.boot_sources(observation)
-                          and (source["id"] not in self.documents or self.documents[source["id"]]["version"] != source["version"])),
-                         key=lambda row: row["arguments"]["id"] != "hotel-bulletin")
-        if pending:
-            self.batch(pending[:3])
-        rest = pending[3:]
-        waiver = bulletin_waiver(self.documents.get("hotel-bulletin"))
-        # Claim during the reads when a slot is idle anyway, or when claiming after them would miss the
-        # bulletin's stated cutoff (an unwaived fee also counts against every spending ceiling).
-        cutoff = bulletin_cutoff(self.documents.get("hotel-bulletin"))
-        claim_after_reads = self.world.now + 2 * -(-len(rest) // 3) + 2
-        if waiver and self.world.observe()["hotel_fee"] and (len(rest) % 3 or (cutoff is not None and claim_after_reads >= cutoff)):
-            rest.insert(0, self.claim(waiver))
-        if rest:
-            self.batch(rest)
-        self.interpret_observed(boot=True)
-
-    def boot_sources(self, observation):
-        """Sources the first interpretation needs: the fixed trip sources, the operational and fare authorities,
-        anything they link, and any catalog ID named in the request or in a source already read.
-
-        Every catalog source is read before the supplied first booking, so extra reference material (agendas,
-        policies, unrelated notes) delays it past the minute-12 deadline. Such sources are read at the next refresh.
-        """
-        catalog = {source["id"] for source in observation["source_catalog"]}
-        needed = {"hotel-terms", "hotel-bulletin", "traveler-profile", "transport-guide", "weather-forecast"}
-        needed |= {reference["id"] for reference in observation["operational_sources"].values()}
-        needed |= {(offer.get("refund_contract_source") or {}).get("id") for offer in self.offers.values()}
-        texts = [notice["text"] for notice in observation["notices"]]
-        for document in self.documents.values():
-            needed |= set(document.get("related", []))
-            texts.append(document["text"])
-        needed |= {identifier for identifier in catalog if any(re.search(rf"\b{re.escape(identifier)}\b", text) for text in texts)}
-        return needed & catalog
-
-    def interpret_observed(self, boot=False):
-        """The supplied refresh after its first batch: read remaining changes, interpret, bind purchased terms."""
-        while not self.world.finished:
-            pending = self.pending_reads(self.world.observe(), everything=not boot)
-            if not pending:
-                break
-            self.batch(pending)
-        observation = self.world.observe()
-        payload_observation = deepcopy(observation)
-        payload_observation.pop("case_id", None)
-        payload = dict(observation=payload_observation, documents=deepcopy(list(self.documents.values())),
-                       offers=deepcopy(list(self.offers.values())), previous=deepcopy(self.program))
-        if self.program is None or self.refresh_context:
-            self.program = self.interpret(payload)
-            self.interpreted_documents = deepcopy(self.documents)
-        for identifier in self.sale_ids:
-            self.offer_weather[identifier] = deepcopy(self.facts["weather"])
-        self.revision = observation["revision"]
-        if self.program is None:
-            return
-        for booking in self.world.observe()["bookings"]:
-            if booking.get("status") != "confirmed" or booking.get("kind") != "transport":
-                continue
-            if self.booked_programs.get(booking["id"]) is not None:
-                continue
-            reference = booking.get("refund_contract_source", {})
-            source = self.interpreted_documents.get(reference.get("id"))
-            if source and source["version"] == reference.get("version"):
-                self.booked_programs[booking["id"]] = deepcopy(self.program["refund_terms"].get(booking["option_id"]))
-                self.booked_evidence[booking["id"]] = dict(purchased_source=deepcopy(reference),
-                                                           read_source=deepcopy(source), interpreted_version_matches=True)
-
-    def recovery_opportunity(self, observation, booking):
-        """The supplied prepare() choice of one affordable recovery, without deferral and without the hold call."""
-        opportunities = []
-        for forecast in self.facts["forecasts"]:
-            when, delay = forecast.get("at"), forecast.get("delay")
-            if type(when) not in (int, float) or type(delay) not in (int, float) or when <= self.world.now:
-                continue
-            scenario = dict(self.facts["weather"], **{forecast["mode"]: delay})
-            if self.keep_valid(observation, booking, weather=scenario, at=when):
-                continue
-            if any(hold["status"] == "held" and hold["expires_at"] > when + 4
-                   and (candidate := self.offers.get(hold["option_id"]))
-                   and self.purchase_plan(observation, candidate, booking, weather=scenario, at=when) is not None
-                   for hold in observation["holds"]):
-                continue
-            for offer in self.candidates(observation):
-                if offer["id"] == booking["option_id"]:
-                    continue
-                if any(hold["option_id"] == offer["id"] and hold["status"] == "held" and hold["expires_at"] > when + 4
-                       for hold in observation["holds"]):
-                    continue
-                if offer["expires_at"] > when + 1 or self.world.now + 1 >= offer["expires_at"]:
-                    continue
-                context = self.context(observation, offer, at=self.world.now + 1)
-                fee = offer.get("hold_fee_usd", 0)
-                limit = self.number(self.program["budget_limit"], context) if fee else None
-                if fee and (limit is None or observation["net_transport_spend_usd"] + observation["hotel_fee"] + fee > limit):
-                    continue
-                imagined = deepcopy(observation)
-                imagined["virtual_minute"] = when
-                imagined["net_transport_spend_usd"] += fee
-                imagined["uncredited_hold_deposits_usd"] = imagined.get("uncredited_hold_deposits_usd", 0) + fee
-                imagined["holds"].append(dict(offer, id="anticipated-hold", option_id=offer["id"], held_at=self.world.now + 1,
-                                              expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
-                plan = self.purchase_plan(imagined, offer, booking, weather=scenario, at=when)
-                if plan is not None:
-                    opportunities.append((not plan["preferred"], fee, plan["expense"], offer["expires_at"], offer))
-        return min(opportunities, key=lambda row: row[:4])[4] if opportunities else None
-
-    def implement(self, plan, booking):
-        """The supplied implement(); after a confirmation whose recovery window is closing, hold it while verifying."""
-        offer, held = plan["option"], plan["hold"]
-        if held is None:
-            result = self.call("hold", id=offer["id"])
-            if not result.get("ok"):
-                return False
-            held = result["hold"]
-        if self.world.observe()["revision"] != self.revision:
-            self.refresh()
-        current = self.active(self.world.observe())
-        revised = self.purchase_plan(self.world.observe(), self.offers[offer["id"]], current)
-        if revised is None:
-            return False
-        if current:
-            result = self.call("cancel", id=current["id"], code=self.facts["consent"])
-            if not result.get("ok"):
-                return False
-            if self.world.observe()["revision"] != self.revision:
-                self.refresh()
-            revised = self.purchase_plan(self.world.observe(), self.offers[offer["id"]])
-            if revised is None:
-                return False
-        offer, held = revised["option"], revised["hold"]
-        if held is None:
-            return False
-        self.serial += 1
-        key = "contract-booking-" + str(self.serial)
-        confirmed = self.call("confirm", id=held["id"], code=self.facts["consent"], key=key).get("booking") or {}
-        recovery = None
-        if self.advance_preparation and confirmed.get("status") == "confirmed":
-            recovery = self.recovery_opportunity(self.world.observe(), confirmed)
-            if recovery is not None and recovery["expires_at"] - 2 > self.world.now:
-                recovery = None  # still time: the run loop's prepare() handles it at its latest start
-        if recovery is None:
-            receipt = self.call("status", key=key)
-        else:
-            receipt, prepared = self.batch([action("status", key=key), action("hold", id=recovery["id"])])
-            self.trace.append(dict(kind="preparation", strategy="one affordable recovery, held while verifying",
-                                   option_id=recovery["id"], result=deepcopy(prepared)))
-        if receipt.get("booking") and receipt["booking"]["status"] == "confirmed":
-            booking = receipt["booking"]
-            reference = booking.get("refund_contract_source", {})
-            evidence = self.interpreted_documents.get(reference.get("id"))
-            matches = evidence is not None and evidence["version"] == reference.get("version")
-            self.booked_programs[booking["id"]] = (
-                deepcopy(self.program["refund_terms"][offer["id"]]) if matches else None)
-            self.booked_evidence[booking["id"]] = dict(
-                purchased_source=deepcopy(reference), read_source=deepcopy(evidence), interpreted_version_matches=matches)
-            return True
-        return False
-
-    def choose_plan(self, observation, booking):
-        """The supplied choice, but a first booking in a tier with later changes avoids a locked fare.
-
-        A locked ticket (refund expression null) cannot be cancelled, so any later amendment that makes it unusable
-        cannot be repaired. Among first bookings of equal preference, a cancellable fare is taken before price.
-        """
-        if booking or observation.get("tier") == "basic":
-            return super().choose_plan(observation, booking)
-        terms = self.program["refund_terms"]
-        plans = [plan for offer in self.candidates(observation)
-                 if (plan := self.purchase_plan(observation, offer, None)) is not None]
-        plans.sort(key=lambda plan: (not plan["preferred"], plan["option"]["id"] in terms and terms[plan["option"]["id"]] is None,
-                                     plan["expense"], plan["loss"], plan["option"]["arrival_minute"]))
-        return plans[0] if plans else None
-
-    def claim_pending_waiver(self, first=False):
-        """Claim the current interpreted evidence once; on the first pass, hold the planned booking alongside."""
-        observation = self.world.observe()
-        waiver = self.facts["waiver"]
-        if not observation["hotel_fee"] or waiver_key(waiver) in self.claimed:
-            return
-        plan = None
-        if first and not self.active(observation):
-            plan = self.choose_plan(dict(observation, hotel_fee=0), None)
-        if plan is None or plan["hold"] is not None:
-            self.batch([self.claim(waiver)])
-            return
-        _, held = self.batch([self.claim(waiver), action("hold", id=plan["option"]["id"])])
-        if held.get("ok"):
-            self.trace.append(dict(kind="planned_purchase", at=self.world.now, plan=deepcopy(plan)))
-            self.implement(dict(plan, hold=held["hold"]), None)
-
-    def run(self):
-        """The supplied run loop, with claim_pending_waiver in place of its single initial claim."""
-        self.refresh(initial=True)
-        if self.world.finished:
-            return
-        self.claim_pending_waiver(first=True)
-        for iteration in range(self.max_decisions):
-            if self.world.finished:
-                break
-            observation = self.world.observe()
-            if observation["revision"] != self.revision:
-                current = self.active(observation)
-                if current and self.advance_preparation:
-                    self.prepare(observation, current)
-                self.refresh()
-                observation = self.world.observe()
-            self.claim_pending_waiver()
-            observation = self.world.observe()
-            if any(booking.get("status") == "pending_verification" for booking in observation["bookings"]):
-                self.call("status")
-                observation = self.world.observe()
-            booking = self.active(observation)
-            plan = self.choose_plan(observation, booking)
-            if plan:
-                self.trace.append(dict(kind="planned_purchase", at=self.world.now, plan=deepcopy(plan)))
-                self.implement(plan, booking)
-                continue
-            if observation["virtual_minute"] >= observation["handoff_minute"]:
-                self.call("finish")
-                break
-            wake = None
-            if booking and self.advance_preparation:
-                wake = self.prepare(observation, booking)
-                if wake == self.world.now:
-                    continue
-            observation = self.world.observe()
-            next_time = min(observation["handoff_minute"], self.world.now + 2)
-            if wake is not None and wake > self.world.now:
-                next_time = min(next_time, wake)
-            for forecast in self.facts["forecasts"]:
-                when = forecast.get("at")
-                if type(when) in (int, float) and when > self.world.now:
-                    next_time = min(next_time, when)
-            idle_reads = [row for row in self.pending_reads(observation, everything=True)
-                          if row["arguments"]["id"] not in self.documents][:3]
-            if idle_reads and next_time - self.world.now >= 2:
-                self.batch(idle_reads)  # a read takes the same two minutes as the wait it replaces
-                continue
-            self.call("wait", minutes=max(1, min(36, int(next_time - self.world.now))))
-        if not self.world.finished:
-            self.call("finish")
-
-
-def run_timely_hybrid(world, api, config, route_fn):
-    """The supplied run_operational_hybrid, driving TimelyController instead of Controller."""
-    traces, memory, seen_versions = [], {}, {}
-
-    def interpret(payload):
-        observation = payload["observation"]
-        domains = list(dict.fromkeys(route_fn(observation, deepcopy(memory))))
-        if any(domain not in ("traveler", "transport", "hotel") for domain in domains):
-            raise ValueError("Route to traveler, transport, or hotel.")
-        if payload.get("previous") is None:
-            domains = ["traveler", "transport", "hotel"]
-        scopes = role_source_ids(payload)
-        for source in payload["documents"]:
-            if seen_versions.get(source["id"]) != source["version"]:
-                for domain, identifiers in scopes.items():
-                    if source["id"] in identifiers and domain not in domains:
-                        domains.append(domain)
-        previous_refunds = (payload.get("previous") or {}).get("refund_terms", {})
-        if set(previous_refunds) != {offer["id"] for offer in payload["offers"]} and "transport" not in domains:
-            domains.append("transport")
-        result = compile_contract(payload, api, config, domains, traces)
-        seen_versions.update({source["id"]: source["version"] for source in payload["documents"]})
-        memory.update(investigated=True, revision=observation["revision"], investigated_at=observation["virtual_minute"])
-        return result
-
-    controller = TimelyController(world, interpret, traces, refresh_context=config["refresh_context"],
-                                  max_decisions=config["max_decisions"],
-                                  prepare=config.get("forecast_strategy", "precaution") != "cheapest")
-    controller.run()
-    memory.update(documents=deepcopy(controller.documents), compiled=deepcopy(controller.program),
-                  purchased_refund_terms=deepcopy(controller.booked_programs),
-                  purchased_refund_evidence=deepcopy(controller.booked_evidence))
-    return dict(traces=traces, working_memory=memory,
-                context=dict(architecture=config["architecture"], source_versions=seen_versions))
 
 
 def choose_offer_with_decisions(observation, trip_state, offers, api):
@@ -1476,12 +726,11 @@ def solve(world, api, config, route_fn):
                 result = read_spending_amendment(payload, previous_packet)
             if result is None:
                 result = (compile_partially(api, settings, instructions, payload, label, previous_packet)
-                          or interpret_with_consent_references(api, dict(settings, effort=FULL_CALL_EFFORT),
-                                                               instructions, payload, schema, label))
+                          or interpret_with_consent_references(api, settings, instructions, payload, schema, label))
                 if refunds := read_weather_refunds(payload):
                     result = dict(result, refund_groups=refunds)
             previous_packet = payload
-            return bind_refund_items(result)
+            return result
 
-        return run_timely_hybrid(world, SimpleNamespace(json=interpret), config, route_fn)
+        return supplied_agent(world, SimpleNamespace(json=interpret), config, route_fn)
     return supplied_agent(world, api, config, route_fn)
