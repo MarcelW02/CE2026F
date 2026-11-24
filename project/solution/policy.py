@@ -844,7 +844,10 @@ class LateSalesController(_Controller):
        searches only after a notice, so an idle wait of two minutes or more becomes a search of the same length;
        newly listed offers trigger a refresh (their refund terms) and normal re-planning.
     2. Actual disruptions to two modes can matter jointly (Forecast). Besides each announced possibility on its
-       own, preparation also covers the joint scenario in which every announced delay happens.
+       own, preparation also covers the joint scenario in which every announced delay happens, choosing one
+       recovery per scenario that nothing else covers and holding all that are due together.
+    3. A notice that arrives shortly before recovery sales close triggers a two-minute source refresh; holds that
+       would fall due during it are placed before the refresh rather than after the sale has closed.
     """
 
     def call(self, tool, **arguments):
@@ -870,7 +873,17 @@ class LateSalesController(_Controller):
             for row in rows:
                 joint[row["mode"]] = max(joint[row["mode"]], row["delay"])
             scenarios.append((joint, max(row["at"] for row in rows)))
-        opportunities = []
+        def imagined_hold(offer, when):
+            fee = offer.get("hold_fee_usd", 0)
+            imagined = _copy.deepcopy(observation)
+            imagined["virtual_minute"] = when
+            imagined["net_transport_spend_usd"] += fee
+            imagined["uncredited_hold_deposits_usd"] = imagined.get("uncredited_hold_deposits_usd", 0) + fee
+            imagined["holds"].append(dict(offer, id="anticipated-hold", option_id=offer["id"], held_at=self.world.now + 1,
+                                          expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
+            return imagined
+
+        chosen = []  # one best recovery per scenario that neither the booking, a live hold nor a chosen one covers
         for scenario, when in scenarios:
             if self.keep_valid(observation, booking, weather=scenario, at=when):
                 continue
@@ -879,6 +892,10 @@ class LateSalesController(_Controller):
                    and self.purchase_plan(observation, candidate, booking, weather=scenario, at=when) is not None
                    for hold in observation["holds"]):
                 continue
+            if any(self.purchase_plan(imagined_hold(row[4], when), row[4], booking, weather=scenario, at=when) is not None
+                   for row in chosen):
+                continue
+            opportunities = []
             for offer in self.candidates(observation):
                 if offer["id"] == booking["option_id"]:
                     continue
@@ -892,24 +909,35 @@ class LateSalesController(_Controller):
                 limit = self.number(self.program["budget_limit"], context) if fee else None
                 if fee and (limit is None or observation["net_transport_spend_usd"] + observation["hotel_fee"] + fee > limit):
                     continue
-                imagined = _copy.deepcopy(observation)
-                imagined["virtual_minute"] = when
-                imagined["net_transport_spend_usd"] += fee
-                imagined["uncredited_hold_deposits_usd"] = imagined.get("uncredited_hold_deposits_usd", 0) + fee
-                imagined["holds"].append(dict(offer, id="anticipated-hold", option_id=offer["id"], held_at=self.world.now + 1,
-                                              expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
-                plan = self.purchase_plan(imagined, offer, booking, weather=scenario, at=when)
+                plan = self.purchase_plan(imagined_hold(offer, when), offer, booking, weather=scenario, at=when)
                 if plan is not None:
                     opportunities.append((not plan["preferred"], fee, plan["expense"], offer["expires_at"], offer))
-        if not opportunities:
+            if opportunities:
+                best = sorted(opportunities, key=lambda row: row[:4])[0]
+                if all(row[4]["id"] != best[4]["id"] for row in chosen):
+                    chosen.append(best)
+        if not chosen:
             return None
-        chosen = sorted(opportunities, key=lambda row: row[:4])[0]
-        latest_start = chosen[3] - 2
-        if self.world.now < latest_start:
-            return int(latest_start)
-        result = self.call("hold", id=chosen[4]["id"])
-        self.trace.append(dict(kind="preparation", strategy="one affordable recovery per uncovered scenario",
-                               option_id=chosen[4]["id"], result=_copy.deepcopy(result)))
+        # A pending source refresh (revision changed, refresh not yet run) takes two minutes before the next decision,
+        # so a hold due within that time is placed now instead of after the refresh, when the sale may have closed.
+        margin = 2 if observation["revision"] != self.revision else 0
+        due = [row for row in chosen if self.world.now >= row[3] - 2 - margin]
+        if not due:
+            return int(min(row[3] - 2 for row in chosen))
+        spend = observation["net_transport_spend_usd"] + observation["hotel_fee"]
+        holds = []
+        for row in due:
+            limit = self.number(self.program["budget_limit"], self.context(observation, row[4], at=self.world.now + 1))
+            if row[1] and (limit is None or spend + row[1] > limit):
+                continue
+            spend += row[1]
+            holds.append(row[4]["id"])
+        if not holds:
+            return None
+        results = self.batch([_action("hold", id=identifier) for identifier in holds])
+        for identifier, result in zip(holds, results):
+            self.trace.append(dict(kind="preparation", strategy="one affordable recovery per uncovered scenario",
+                                   option_id=identifier, result=_copy.deepcopy(result)))
         return self.world.now
 
 
