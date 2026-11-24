@@ -820,6 +820,12 @@ def solve(world, api, config, route_fn):
                 # One bounded repair of a content mistake, naming the validator's objection.
                 result = full_interpretation(settings, instructions + LIMITS_NOTE.format(error=error), payload, schema,
                                              dict(label, attempt="limits_repair"))
+                if ((error := expression_problem(result, offers))
+                        and expression_problem(deduplicated_groups(result, offers), offers)):
+                    # A second, last repair with more reasoning room to restructure, e.g. an over-deep expression.
+                    stronger = dict(settings, effort="medium") if settings.get("effort") == "low" else settings
+                    result = full_interpretation(stronger, instructions + LIMITS_NOTE.format(error=error), payload, schema,
+                                                 dict(label, attempt="limits_repair_2"))
                 if expression_problem(result, offers) and not expression_problem(deduplicated_groups(result, offers), offers):
                     result = deduplicated_groups(result, offers)
             previous_packet = payload
@@ -867,6 +873,14 @@ class LateSalesController(_Controller):
                     self.skip_search_once = False
             return {"ok": True, "virtual_minute": self.world.now}
         return super().call(tool, **arguments)
+
+    def number(self, expression, context):
+        """An expression that cannot be evaluated in one context (e.g. a booking field read before any booking)
+        makes that option unjustified instead of ending the episode: callers already treat None as not allowed."""
+        try:
+            return super().number(expression, context)
+        except (ValueError, TypeError, KeyError, AttributeError, ZeroDivisionError):
+            return None
 
     def batch(self, actions):
         if getattr(self, "skip_search_once", False) and actions and actions[0].get("tool") == "search":
