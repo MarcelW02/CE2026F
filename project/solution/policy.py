@@ -844,7 +844,7 @@ from framework.contract_interpreter import compile_contract as _compile_contract
 
 
 class LateSalesController(_Controller):
-    """The supplied planner plus two behaviours.
+    """The supplied planner plus these behaviours.
 
     1. Recovery sales may open later (Reactive). Search shows only offers on sale now and the supplied loop
        searches only after a notice, so an idle wait of two minutes or more becomes a search of the same length;
@@ -854,7 +854,126 @@ class LateSalesController(_Controller):
        recovery per scenario that nothing else covers and holding all that are due together.
     3. A notice that arrives shortly before recovery sales close triggers a two-minute source refresh; holds that
        would fall due during it are placed before the refresh rather than after the sale has closed.
+    4. Every case has a successful plan, so finding no justified ticket at all means a condition was misread. Rather
+       than finishing without travel, the last-resort ticket that breaks the fewest interpreted conditions is bought:
+       at once in a stable (Basic) trip, otherwise only at the last safe minute, so later valid plans keep priority.
+    5. A refused confirmation is evidence, not something to repeat. Above the actual spending limit, that offer and
+       every offer at least as expensive are skipped until the next notice; a refused approval code is replaced by
+       another approval code stated in the request or sources (the hold stays valid, so retrying costs no money).
     """
+
+    def candidates(self, observation):
+        if getattr(self, "refusal_revision", None) != observation["revision"]:
+            self.refused_ids, self.refusal_revision = set(), observation["revision"]
+        return [offer for offer in super().candidates(observation) if offer["id"] not in self.refused_ids]
+
+    def refresh(self, initial=False):
+        result = super().refresh(initial)
+        if self.program is not None:
+            self.use_untried_consent()  # a re-interpretation may repeat an approval code already refused
+        return result
+
+    def choose_plan(self, observation, booking):
+        if self.program is not None:
+            self.use_untried_consent()
+        plan = super().choose_plan(observation, booking)
+        if plan is not None or booking is not None or self.program is None:
+            return plan
+        try:
+            return self.last_resort(observation)
+        except Exception:
+            return None
+
+    def last_resort(self, observation):
+        now = observation["virtual_minute"]
+        rows = []
+        for offer in self.candidates(observation):
+            held = next((hold for hold in observation["holds"] if hold["status"] == "held"
+                         and hold["option_id"] == offer["id"] and hold["expires_at"] > now + 2), None)
+            if held is None and (offer["id"] not in self.sale_ids or offer.get("available_from", 0) > now
+                                 or now + 1 >= offer["expires_at"]):
+                continue
+            context = self.context(observation, offer, at=now + 3)
+            candidate = context["candidate"]
+            deadline = self.number(self.program["arrival_deadline"], context)
+            limit = self.number(self.program["budget_limit"], context)
+            expense = observation["net_transport_spend_usd"] + observation["hotel_fee"] + offer["price"]
+            rows.append(((deadline is None,
+                          0 if deadline is None else max(0, candidate["meeting_arrival"] - deadline),
+                          bool(self.facts["requires_step_free"] and not offer["step_free"]),
+                          offer["carrier"] in self.facts["avoid_carriers"],
+                          limit is None,
+                          0 if limit is None else max(0, expense - limit),
+                          offer["mode"] != self.facts["preferred"],
+                          offer["price"], offer["arrival_minute"]), offer, held))
+        if not rows:
+            return None
+        _, offer, held = min(rows, key=lambda row: row[0])
+        if observation.get("tier") != "basic":
+            # Wait while a justified plan may still appear, but act before the sale, the first-service deadline
+            # or the horizon makes buying impossible (hold 1 + confirm 2 minutes, plus one decision step).
+            latest = [observation["horizon"] - 3]
+            if held is None:
+                latest.append(offer["expires_at"] - 1)
+            if observation.get("booking_deadline") is not None:
+                latest.append(observation["booking_deadline"] - (2 if held else 3))
+            if now < min(latest) - 4:
+                return None
+        return dict(option=offer, hold=held, last_resort=True)
+
+    def consent_candidates(self):
+        texts = [notice["text"] for notice in reversed(self.world.observe()["notices"])]
+        texts += [source.get("text", "") for source in self.documents.values()]
+        found = []
+        for text in texts:
+            found += re.findall(CONSENT_TOKEN, text)
+            found += re.findall(r"(?i)\b(?:approval|consent|authori[sz]ation)(?:\s+(?:code|token|reference))?\s+"
+                                r"([A-Za-z][\w-]*\d[\w-]*)", text)
+        return list(dict.fromkeys(found))
+
+    def use_untried_consent(self):
+        refused = getattr(self, "refused_consents", set())
+        if self.facts.get("consent") in refused:
+            alternative = next((code for code in self.consent_candidates() if code not in refused), None)
+            if alternative is not None:
+                self.facts["consent"] = alternative
+
+    def implement(self, plan, booking):
+        self.last_confirm = None
+        done = self.buy_last_resort(plan) if plan.get("last_resort") else super().implement(plan, booking)
+        refusal = self.last_confirm
+        if not done and refusal is not None and not refusal.get("ok") and not refusal.get("interrupted"):
+            error = str(refusal.get("error", "")).lower()
+            if "approval" in error:
+                self.refused_consents = getattr(self, "refused_consents", set()) | {self.facts.get("consent")}
+            elif "spending limit" in error:
+                price = plan["option"]["price"]
+                self.refused_ids |= {identifier for identifier, offer in self.offers.items() if offer["price"] >= price}
+        return done
+
+    def buy_last_resort(self, plan):
+        held = plan["hold"]
+        if held is None:
+            result = self.call("hold", id=plan["option"]["id"])
+            if not result.get("ok"):
+                self.refused_ids.add(plan["option"]["id"])
+                return False
+            held = result["hold"]
+        self.serial += 1
+        key = "contract-booking-" + str(self.serial)
+        self.call("confirm", id=held["id"], code=self.facts["consent"], key=key)
+        receipt = self.call("status", key=key)
+        if not (receipt.get("booking") and receipt["booking"]["status"] == "confirmed"):
+            return False
+        booking = receipt["booking"]
+        reference = booking.get("refund_contract_source", {})
+        evidence = self.interpreted_documents.get(reference.get("id"))
+        matches = evidence is not None and evidence["version"] == reference.get("version")
+        self.booked_programs[booking["id"]] = (
+            _copy.deepcopy(self.program["refund_terms"].get(plan["option"]["id"])) if matches else None)
+        self.booked_evidence[booking["id"]] = dict(purchased_source=_copy.deepcopy(reference),
+            read_source=_copy.deepcopy(evidence), interpreted_version_matches=matches)
+        return True
 
     def call(self, tool, **arguments):
         # While an announced forecast is unresolved, keep the supplied wait: prepare() times its backup hold to
@@ -872,7 +991,10 @@ class LateSalesController(_Controller):
                 finally:
                     self.skip_search_once = False
             return {"ok": True, "virtual_minute": self.world.now}
-        return super().call(tool, **arguments)
+        result = super().call(tool, **arguments)
+        if tool == "confirm":
+            self.last_confirm = result
+        return result
 
     def number(self, expression, context):
         """An expression that cannot be evaluated in one context (e.g. a booking field read before any booking)
@@ -883,6 +1005,9 @@ class LateSalesController(_Controller):
             return None
 
     def batch(self, actions):
+        if self.world.finished:
+            # The horizon can pass during a sequence of actions; refuse the rest instead of raising.
+            return [{"ok": False, "error": "Episode horizon reached or episode already finished."} for _ in actions]
         if getattr(self, "skip_search_once", False) and actions and actions[0].get("tool") == "search":
             self.skip_search_once = False
             actions = actions[1:]
