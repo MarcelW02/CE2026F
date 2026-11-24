@@ -859,9 +859,22 @@ class LateSalesController(_Controller):
             known = set(self.offers)
             self.batch([_action("search")])
             if set(self.offers) - known:
-                self.refresh()
+                # The refresh would open with another two-minute search; this one is current, so skip it.
+                self.skip_search_once = True
+                try:
+                    self.refresh()
+                finally:
+                    self.skip_search_once = False
             return {"ok": True, "virtual_minute": self.world.now}
         return super().call(tool, **arguments)
+
+    def batch(self, actions):
+        if getattr(self, "skip_search_once", False) and actions and actions[0].get("tool") == "search":
+            self.skip_search_once = False
+            actions = actions[1:]
+            if not actions:
+                return []
+        return super().batch(actions)
 
     def prepare(self, observation, booking):
         """The supplied prepare() over explicit scenarios: each announced delay alone, plus all of them jointly."""
