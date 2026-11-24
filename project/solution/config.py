@@ -15,7 +15,7 @@ ARCHITECTURE = "hybrid_single"
 REFRESH_CONTEXT = True
 CONCURRENT_INVESTIGATORS = True
 ROUTE_THRESHOLD = 1
-MAX_DECISIONS = 12
+MAX_DECISIONS = 30  # idle searches use more planner rounds; no API cost
 FORECAST_STRATEGY = "precaution"  # precaution, cheapest, or flexible
 
 

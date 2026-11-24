@@ -771,5 +771,121 @@ def solve(world, api, config, route_fn):
             previous_packet = payload
             return result
 
-        return supplied_agent(world, SimpleNamespace(json=interpret), config, route_fn)
+        return run_late_sales_hybrid(world, SimpleNamespace(json=interpret), config, route_fn)
     return supplied_agent(world, api, config, route_fn)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Planner candidate b: published case types the supplied planner cannot play (BENCHMARK.md, Reactive and Forecast).
+# ---------------------------------------------------------------------------------------------------------------
+import copy as _copy
+from framework.contract_policy import Controller as _Controller, action as _action
+from framework.contract_interpreter import compile_contract as _compile_contract, role_source_ids as _role_source_ids
+
+
+class LateSalesController(_Controller):
+    """The supplied planner plus two behaviours.
+
+    1. Recovery sales may open later (Reactive). Search shows only offers on sale now and the supplied loop
+       searches only after a notice, so an idle wait of two minutes or more becomes a search of the same length;
+       newly listed offers trigger a refresh (their refund terms) and normal re-planning.
+    2. Actual disruptions to two modes can matter jointly (Forecast). Besides each announced possibility on its
+       own, preparation also covers the joint scenario in which every announced delay happens.
+    """
+
+    def call(self, tool, **arguments):
+        if tool == "wait" and arguments.get("minutes", 0) >= 2 and not self.world.finished:
+            known = set(self.offers)
+            self.batch([_action("search")])
+            if set(self.offers) - known:
+                self.refresh()
+            return {"ok": True, "virtual_minute": self.world.now}
+        return super().call(tool, **arguments)
+
+    def prepare(self, observation, booking):
+        """The supplied prepare() over explicit scenarios: each announced delay alone, plus all of them jointly."""
+        rows = [row for row in self.facts["forecasts"]
+                if type(row.get("at")) in (int, float) and type(row.get("delay")) in (int, float) and row["at"] > self.world.now]
+        scenarios = [(dict(self.facts["weather"], **{row["mode"]: row["delay"]}), row["at"]) for row in rows]
+        if len({row["mode"] for row in rows}) > 1:
+            joint = dict(self.facts["weather"])
+            for row in rows:
+                joint[row["mode"]] = max(joint[row["mode"]], row["delay"])
+            scenarios.append((joint, max(row["at"] for row in rows)))
+        opportunities = []
+        for scenario, when in scenarios:
+            if self.keep_valid(observation, booking, weather=scenario, at=when):
+                continue
+            if any(hold["status"] == "held" and hold["expires_at"] > when + 4
+                   and (candidate := self.offers.get(hold["option_id"]))
+                   and self.purchase_plan(observation, candidate, booking, weather=scenario, at=when) is not None
+                   for hold in observation["holds"]):
+                continue
+            for offer in self.candidates(observation):
+                if offer["id"] == booking["option_id"]:
+                    continue
+                if any(hold["option_id"] == offer["id"] and hold["status"] == "held" and hold["expires_at"] > when + 4
+                       for hold in observation["holds"]):
+                    continue
+                if offer["expires_at"] > when + 1 or self.world.now + 1 >= offer["expires_at"]:
+                    continue
+                context = self.context(observation, offer, at=self.world.now + 1)
+                fee = offer.get("hold_fee_usd", 0)
+                limit = self.number(self.program["budget_limit"], context) if fee else None
+                if fee and (limit is None or observation["net_transport_spend_usd"] + observation["hotel_fee"] + fee > limit):
+                    continue
+                imagined = _copy.deepcopy(observation)
+                imagined["virtual_minute"] = when
+                imagined["net_transport_spend_usd"] += fee
+                imagined["uncredited_hold_deposits_usd"] = imagined.get("uncredited_hold_deposits_usd", 0) + fee
+                imagined["holds"].append(dict(offer, id="anticipated-hold", option_id=offer["id"], held_at=self.world.now + 1,
+                                              expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
+                plan = self.purchase_plan(imagined, offer, booking, weather=scenario, at=when)
+                if plan is not None:
+                    opportunities.append((not plan["preferred"], fee, plan["expense"], offer["expires_at"], offer))
+        if not opportunities:
+            return None
+        chosen = sorted(opportunities, key=lambda row: row[:4])[0]
+        latest_start = chosen[3] - 2
+        if self.world.now < latest_start:
+            return int(latest_start)
+        result = self.call("hold", id=chosen[4]["id"])
+        self.trace.append(dict(kind="preparation", strategy="one affordable recovery per uncovered scenario",
+                               option_id=chosen[4]["id"], result=_copy.deepcopy(result)))
+        return self.world.now
+
+
+def run_late_sales_hybrid(world, api, config, route_fn):
+    """The supplied run_operational_hybrid, driving LateSalesController instead of Controller."""
+    traces, memory, seen_versions = [], {}, {}
+
+    def interpret(payload):
+        observation = payload["observation"]
+        domains = list(dict.fromkeys(route_fn(observation, _copy.deepcopy(memory))))
+        if any(domain not in ("traveler", "transport", "hotel") for domain in domains):
+            raise ValueError("Route to traveler, transport, or hotel.")
+        if payload.get("previous") is None:
+            domains = ["traveler", "transport", "hotel"]
+        scopes = _role_source_ids(payload)
+        for source in payload["documents"]:
+            if seen_versions.get(source["id"]) != source["version"]:
+                for domain, identifiers in scopes.items():
+                    if source["id"] in identifiers and domain not in domains:
+                        domains.append(domain)
+        previous_refunds = (payload.get("previous") or {}).get("refund_terms", {})
+        if set(previous_refunds) != {offer["id"] for offer in payload["offers"]} and "transport" not in domains:
+            domains.append("transport")
+        result = _compile_contract(payload, api, config, domains, traces)
+        seen_versions.update({source["id"]: source["version"] for source in payload["documents"]})
+        memory.update(investigated=True, revision=observation["revision"], investigated_at=observation["virtual_minute"])
+        return result
+
+    controller = LateSalesController(world, interpret, traces, refresh_context=config["refresh_context"],
+                                     max_decisions=config["max_decisions"],
+                                     prepare=config.get("forecast_strategy", "precaution") != "cheapest")
+    controller.run()
+    memory.update(documents=_copy.deepcopy(controller.documents), compiled=_copy.deepcopy(controller.program),
+                  purchased_refund_terms=_copy.deepcopy(controller.booked_programs),
+                  purchased_refund_evidence=_copy.deepcopy(controller.booked_evidence))
+    return dict(traces=traces, working_memory=memory,
+                context=dict(architecture=config["architecture"], source_versions=seen_versions))
