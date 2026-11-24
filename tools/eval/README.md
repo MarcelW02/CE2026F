@@ -37,3 +37,20 @@ The truth planner uses the supplied planner, so it cannot solve cases whose timi
 example a notice before minute 8 with the first booking due at minute 12). Teams prove their own cases with their
 own solvers, which are mostly built on the same planner, so such cases are probably rare in the official set.
 Supply a hand-written witness when a valid case needs faster actions.
+
+## Calibration of sealed_v1 (2026-11-24)
+
+`sealed_v1.json`: 90 cases (30 per tier) from three independent authors, every case replay-verified. Public + sealed,
+two sealed repeats, official formula (N = 120):
+
+| Version | Sealed set (mean) | Leaderboard |
+|---|---:|---:|
+| Louisa `443103b` | 88.87 (outcome 84.38) | 91.04 (outcome 85.79) |
+| `f70eb4e` | 89.11 (outcome 84.31) | 89.14 (outcome 83.87) |
+| `e39fc77` | 85.18 (outcome 80.06, arrival 32.17) | 84.67 (outcome 78.67, arrival 32.00) |
+
+**Accepted.** The set reproduces the leaderboard level, the regression of `e39fc77` (−3.9 against −4.5 to −6.4) and
+its arrival loss. Louisa and `f70eb4e` are within noise of each other, so their 1.9-point leaderboard gap was most
+likely run-to-run variation. Repeat-to-repeat spread is about ±0.5 total. The tier split of the regression differs
+(sealed: Forecast; leaderboard: Basic), so judge totals and criteria, not single tiers. Sealed cases cost somewhat
+more than the official ones (Louisa efficiency 4.50 against 5.25).
