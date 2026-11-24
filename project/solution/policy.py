@@ -760,6 +760,24 @@ def deduplicated_groups(result, offers):
     return dict(result, refund_groups=groups)
 
 
+class RetryIncomplete:
+    """One fresh attempt when a reply is incomplete or refused (ResponseFailure), e.g. a runaway reply that hits
+    max_output_tokens. Without it the exception ends the episode. Connection and budget errors still propagate."""
+
+    def __init__(self, api):
+        self.api = api
+
+    def json(self, settings, instructions, payload, schema, label):
+        from framework.common import ResponseFailure
+        try:
+            return self.api.json(settings, instructions, payload, schema, label)
+        except ResponseFailure:
+            return self.api.json(settings, instructions, payload, schema, dict(label, attempt="retry_incomplete"))
+
+    def __getattr__(self, name):
+        return getattr(self.api, name)
+
+
 def solve(world, api, config, route_fn):
     """Retain the supplied agent, or implement your own observed-information loop.
 
@@ -771,6 +789,7 @@ def solve(world, api, config, route_fn):
     """
     if config["architecture"] == "hybrid_single" and world.observe().get("operational_sources"):
         previous_packet = None
+        api = RetryIncomplete(api)
 
         def full_interpretation(settings, instructions, payload, schema, label):
             result = interpret_with_consent_references(api, settings, instructions, payload, schema, label)
