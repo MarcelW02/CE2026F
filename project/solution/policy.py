@@ -812,7 +812,11 @@ class LateSalesController(_Controller):
     """
 
     def call(self, tool, **arguments):
-        if tool == "wait" and arguments.get("minutes", 0) >= 2 and not self.world.finished:
+        # While an announced forecast is unresolved, keep the supplied wait: prepare() times its backup hold to
+        # the last safe minute before the sale closes, and an extra search with its refresh can overrun it.
+        pending = any(type(row.get("at")) in (int, float) and row["at"] > self.world.now
+                      for row in ((self.program or {}).get("facts") or {}).get("forecasts", []))
+        if tool == "wait" and arguments.get("minutes", 0) >= 2 and not self.world.finished and not pending:
             known = set(self.offers)
             self.batch([_action("search")])
             if set(self.offers) - known:
