@@ -714,6 +714,20 @@ LIMITS_NOTE = (
 )
 
 
+# Forecast-tier candidates (off by default; Basic and Reactive requests never change).
+FORECAST_TIER_NOTE = False
+FORECAST_TIER_SETTINGS = {}  # e.g. {"effort": "medium"} or {"model": "gpt-5.6-luna"}
+FORECAST_NOTE = (
+    "\nWeather-dependent conditions: test exactly what the text conditions on. A realized delay is "
+    "state.weather.<mode>, which is zero until an arrived operating report states that the delay happened; an "
+    "announced, possible or forecast delay never satisfies a condition about an actual delay. When a raised "
+    "allowance or later arrival depends on the booked or held ticket being delayed, test that ticket's own mode "
+    "and weather_exposed together with the realized delay of that mode, not any delay of any mode. Outside the "
+    "stated condition the expression returns the ordinary value. Put a mode's delay in facts.weather only after "
+    "an arrived notice reports it as observed; announced possibilities belong only in forecasts."
+)
+
+
 def expression_problem(result, offers):
     """The framework validator's objection to a compiled result, or None when the planner can use it.
 
@@ -767,6 +781,9 @@ def solve(world, api, config, route_fn):
         def interpret(settings, instructions, payload, schema, label):
             nonlocal previous_packet
             full = False
+            if payload["observation"].get("tier") == "forecast":
+                instructions += FORECAST_NOTE if FORECAST_TIER_NOTE else ""
+                settings = dict(settings, **FORECAST_TIER_SETTINGS)
             result = resolve_observed_weather(payload, previous_packet)
             if result is None:
                 result = read_initial_contract(payload)
