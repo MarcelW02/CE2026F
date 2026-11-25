@@ -852,6 +852,8 @@ from framework.contract_interpreter import compile_contract as _compile_contract
 
 WEATHER_ROBUST_FIRST = True    # with a pending forecast, prefer a sheltered ticket within the same preference class
 BACKUP_BY_COVERAGE = True      # choose backup holds that cover the most announced scenarios first
+SEARCH_WHILE_CONFIRMING = True  # with a pending forecast, search in a free slot while a confirmation runs
+HEDGE_FIRST_BOOKING = True      # hold a sheltered backup together with an exposed first ticket when backup sales close early
 
 
 class LateSalesController(_Controller):
@@ -971,9 +973,58 @@ class LateSalesController(_Controller):
             if alternative is not None:
                 self.facts["consent"] = alternative
 
+    def first_booking_hedge(self, observation, plan):
+        """A sheltered backup for an exposed first ticket when backup sales close before the weather report: a forecast
+        estimate can still be raised while the first ticket is being bought, and afterwards the sale may be over."""
+        offer = plan["option"]
+        if plan.get("hold") is not None or not offer.get("weather_exposed") or offer.get("mode") not in self.pending_forecast_modes():
+            return None
+        rows = [row for row in self.facts["forecasts"]
+                if row.get("mode") == offer["mode"] and type(row.get("at")) in (int, float) and row["at"] > self.world.now]
+        when = max(row["at"] for row in rows)
+        now = self.world.now
+        worst = dict(self.facts["weather"], **{offer["mode"]: 240})
+        booking = dict(offer, id="planned-booking", option_id=offer["id"], kind="transport", status="confirmed",
+                       held_at=now + 1, confirmed_at=now + 3)
+        best = None
+        for candidate in self.candidates(observation):
+            if candidate["id"] == offer["id"] or not self.weather_robust(candidate):
+                continue
+            if candidate["expires_at"] > when + 1 or now + 1 >= candidate["expires_at"]:
+                continue  # still on sale after the report, or already closing
+            if candidate["expires_at"] > now + 5:
+                continue  # prepare() can still hold it at the last safe minute after the first ticket, keeping it longer
+            fee = candidate.get("hold_fee_usd", 0)
+            limit = self.number(self.program["budget_limit"], self.context(observation, offer, at=now + 3))
+            # the deposit is charged before the first ticket is confirmed and counts towards that confirmation
+            if limit is None or observation["net_transport_spend_usd"] + observation["hotel_fee"] + offer["price"] + fee > limit:
+                continue
+            imagined = _copy.deepcopy(observation)
+            imagined["virtual_minute"] = when
+            imagined["net_transport_spend_usd"] += offer["price"] + fee
+            imagined["uncredited_hold_deposits_usd"] = imagined.get("uncredited_hold_deposits_usd", 0) + fee
+            imagined["bookings"] = list(imagined["bookings"]) + [booking]
+            imagined["holds"] = list(imagined["holds"]) + [dict(candidate, id="anticipated-hold", option_id=candidate["id"],
+                                held_at=now + 1, expires_at=observation["horizon"], deposit_paid_usd=fee, status="held")]
+            try:
+                backup = self.purchase_plan(imagined, candidate, booking, weather=worst, at=when)
+            except Exception:
+                backup = None
+            if backup is not None:
+                key = (not backup["preferred"], fee, backup["expense"])
+                if best is None or key < best[0]:
+                    best = (key, candidate["id"])
+        return best[1] if best else None
+
     def implement(self, plan, booking):
         self.last_confirm = None
+        if HEDGE_FIRST_BOOKING and booking is None and not plan.get("last_resort") and self.program is not None:
+            try:
+                self.extra_hold = self.first_booking_hedge(self.world.observe(), plan)
+            except Exception:
+                self.extra_hold = None
         done = self.buy_last_resort(plan) if plan.get("last_resort") else super().implement(plan, booking)
+        self.extra_hold = None
         refusal = self.last_confirm
         if not done and refusal is not None and not refusal.get("ok") and not refusal.get("interrupted"):
             error = str(refusal.get("error", "")).lower()
@@ -1024,7 +1075,20 @@ class LateSalesController(_Controller):
                 finally:
                     self.skip_search_once = False
             return {"ok": True, "virtual_minute": self.world.now}
-        result = super().call(tool, **arguments)
+        extra = getattr(self, "extra_hold", None)
+        if tool == "hold" and extra and extra != arguments.get("id"):
+            self.extra_hold = None
+            results = self.batch([_action("hold", **arguments), _action("hold", id=extra)])
+            self.trace.append(dict(kind="preparation", strategy="sheltered backup with the first exposed ticket",
+                                   option_id=extra, result=_copy.deepcopy(results[1])))
+            return results[0]
+        if (tool == "confirm" and SEARCH_WHILE_CONFIRMING and self.program is not None
+                and self.pending_forecast_modes()):
+            # A confirmation takes two minutes in one of three slots. A recovery sale announced meanwhile can close
+            # before the next free decision, so the same two minutes also run a search.
+            result = self.batch([_action("confirm", **arguments), _action("search")])[0]
+        else:
+            result = super().call(tool, **arguments)
         if tool == "confirm":
             self.last_confirm = result
         return result
