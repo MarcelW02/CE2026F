@@ -850,6 +850,10 @@ from framework.contract_policy import Controller as _Controller, action as _acti
 from framework.contract_interpreter import compile_contract as _compile_contract, role_source_ids as _role_source_ids
 
 
+WEATHER_ROBUST_FIRST = True    # with a pending forecast, prefer a sheltered ticket within the same preference class
+BACKUP_BY_COVERAGE = True      # choose backup holds that cover the most announced scenarios first
+
+
 class LateSalesController(_Controller):
     """The supplied planner plus these behaviours.
 
@@ -883,13 +887,35 @@ class LateSalesController(_Controller):
     def choose_plan(self, observation, booking):
         if self.program is not None:
             self.use_untried_consent()
-        plan = super().choose_plan(observation, booking)
+        plan = self.ordered_plan(observation, booking)
         if plan is not None or booking is not None or self.program is None:
             return plan
         try:
             return self.last_resort(observation)
         except Exception:
             return None
+
+    def pending_forecast_modes(self):
+        return {row.get("mode") for row in (self.facts.get("forecasts") or [])
+                if type(row.get("at")) in (int, float) and row["at"] > self.world.now}
+
+    def weather_robust(self, offer):
+        return not (offer.get("weather_exposed") and offer.get("mode") in self.pending_forecast_modes())
+
+    def ordered_plan(self, observation, booking):
+        """The supplied choose_plan; with a pending forecast a sheltered ticket comes first within the same preference
+        class. The score does not reward a cheaper fare, while a delay on an exposed ticket can cost the arrival."""
+        if not WEATHER_ROBUST_FIRST:
+            return super().choose_plan(observation, booking)
+        plans = [plan for offer in self.candidates(observation)
+                 if not booking or offer["id"] != booking["option_id"]
+                 if (plan := self.purchase_plan(observation, offer, booking)) is not None]
+        plans.sort(key=lambda plan: (not plan["preferred"], not self.weather_robust(plan["option"]), plan["expense"],
+                                     plan["loss"], plan["option"]["arrival_minute"]))
+        if booking and self.keep_valid(observation, booking):
+            if booking["mode"] == self.facts["preferred"] or not plans or not plans[0]["preferred"]:
+                return None
+        return plans[0] if plans else None
 
     def last_resort(self, observation):
         now = observation["virtual_minute"]
@@ -1042,7 +1068,7 @@ class LateSalesController(_Controller):
                                           expires_at=observation["horizon"], deposit_paid_usd=fee, status="held"))
             return imagined
 
-        chosen = []  # one best recovery per scenario that neither the booking, a live hold nor a chosen one covers
+        uncovered = []  # announced scenarios that neither the booking nor a live hold covers
         for scenario, when in scenarios:
             if self.keep_valid(observation, booking, weather=scenario, at=when):
                 continue
@@ -1051,10 +1077,9 @@ class LateSalesController(_Controller):
                    and self.purchase_plan(observation, candidate, booking, weather=scenario, at=when) is not None
                    for hold in observation["holds"]):
                 continue
-            if any(self.purchase_plan(imagined_hold(row[4], when), row[4], booking, weather=scenario, at=when) is not None
-                   for row in chosen):
-                continue
-            opportunities = []
+            uncovered.append((scenario, when))
+        coverage = {}
+        for index, (scenario, when) in enumerate(uncovered):
             for offer in self.candidates(observation):
                 if offer["id"] == booking["option_id"]:
                     continue
@@ -1070,11 +1095,27 @@ class LateSalesController(_Controller):
                     continue
                 plan = self.purchase_plan(imagined_hold(offer, when), offer, booking, weather=scenario, at=when)
                 if plan is not None:
-                    opportunities.append((not plan["preferred"], fee, plan["expense"], offer["expires_at"], offer))
-            if opportunities:
-                best = sorted(opportunities, key=lambda row: row[:4])[0]
-                if all(row[4]["id"] != best[4]["id"] for row in chosen):
-                    chosen.append(best)
+                    row = coverage.setdefault(offer["id"], dict(offer=offer, fee=fee, covers=set(), preferred=plan["preferred"],
+                                                                expense=plan["expense"]))
+                    row["covers"].add(index)
+        chosen = []
+        remaining = set(range(len(uncovered)))
+        while remaining:
+            options = [row for row in coverage.values() if row["covers"] & remaining]
+            if not options:
+                break
+            if BACKUP_BY_COVERAGE:
+                # One hold that stays valid in every scenario beats a cheaper one per scenario: outcomes of one weather
+                # system are often joint, and the budget may not allow a second deposit.
+                key = lambda row: (-len(row["covers"] & remaining), not row["preferred"], row["fee"], row["expense"],
+                                   row["offer"]["expires_at"])
+            else:
+                key = lambda row: (min(row["covers"] & remaining), not row["preferred"], row["fee"], row["expense"],
+                                   row["offer"]["expires_at"])
+            best = min(options, key=key)
+            chosen.append((not best["preferred"], best["fee"], best["expense"], best["offer"]["expires_at"], best["offer"]))
+            remaining -= best["covers"]
+            coverage.pop(best["offer"]["id"])
         if not chosen:
             return None
         # A pending source refresh (revision changed, refresh not yet run) takes two minutes before the next decision,
