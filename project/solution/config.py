@@ -12,7 +12,7 @@ TOP_P = None
 ARCHITECTURE = "hybrid_multi"
 # False freezes model-extracted fields after the first interpretation in the hybrid.
 # True enables selective re-interpretation; live observations still update in both.
-REFRESH_CONTEXT = False
+REFRESH_CONTEXT = True
 CONCURRENT_INVESTIGATORS = True
 ROUTE_THRESHOLD = 1
 MAX_DECISIONS = 12
