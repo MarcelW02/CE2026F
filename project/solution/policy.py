@@ -857,6 +857,8 @@ HEDGE_FIRST_BOOKING = True      # hold a sheltered backup together with an expos
 UNKNOWN_DELAY_IS_SEVERE = True  # a forecast without a single delay estimate (e.g. a range) is hedged as a severe delay
 VERBATIM_CONSENT = True         # an approval code must appear literally in the notices; restore a dropped prefix
 SEVERE_DELAY = 240
+PARALLEL_CLAIM = True       # run the initial waiver claim with the first hold (only when the deadline is tight)
+FIRST_SERVICE_RUSH = True   # confirm the first replacement before a refresh that would miss the deadline
 
 
 class LateSalesController(_Controller):
@@ -884,15 +886,46 @@ class LateSalesController(_Controller):
         return [offer for offer in super().candidates(observation) if offer["id"] not in self.refused_ids]
 
     def refresh(self, initial=False):
+        if not initial and FIRST_SERVICE_RUSH and self.first_service_rush():
+            # A notice arrived just before the first-service deadline: confirm the planned replacement under the
+            # current reading first; the re-read follows right after and can still lead to a rebooking.
+            self.trace.append(dict(kind="first_service_rush", at=self.world.now))
+            return None
         result = super().refresh(initial)
         if self.program is not None:
             self.restore_verbatim_consent()
             self.use_untried_consent()  # a re-interpretation may repeat an approval code already refused
         return result
 
+    def first_service_rush(self):
+        """True when buying now still meets the first-service deadline but a two-minute refresh first would not."""
+        observation = self.world.observe()
+        deadline = observation.get("booking_deadline")
+        if deadline is None or self.program is None or any(
+                booking.get("kind") == "transport" and booking.get("status") in ("confirmed", "pending_verification")
+                for booking in observation["bookings"]):
+            return False
+        now = observation["virtual_minute"]
+        held = any(hold["status"] == "held" and hold["expires_at"] > now + 2 for hold in observation["holds"])
+        need = 2 if held else 3  # confirm, or hold + confirm
+        if not now + need <= deadline < now + 2 + need:
+            return False
+        if held:
+            return True
+        try:
+            return _Controller.choose_plan(self, self.planning_view(observation), None) is not None
+        except Exception:
+            return False
+
+    def planning_view(self, observation):
+        # A deferred waiver claim runs in the same batch as the first hold and completes before the confirmation,
+        # so plans are made as after the claim (the revised plan after the hold uses the actual claim result).
+        return dict(observation, hotel_fee=0) if getattr(self, "pending_claim", None) else observation
+
     def choose_plan(self, observation, booking):
         if self.program is not None:
             self.use_untried_consent()
+        observation = self.planning_view(observation)
         plan = self.ordered_plan(observation, booking)
         if plan is not None or booking is not None or self.program is None:
             return plan
@@ -1011,7 +1044,10 @@ class LateSalesController(_Controller):
                 continue
             if candidate["expires_at"] > when + 1 or now + 1 >= candidate["expires_at"]:
                 continue  # still on sale after the report, or already closing
-            if candidate["expires_at"] > now + 5:
+            # The next decision after the first ticket: hold 1 (2 with a deferred waiver claim in the same batch),
+            # confirm 2, status 1. prepare() can still hold the backup then if it is on sale one minute later.
+            next_decision = now + (2 if getattr(self, "pending_claim", None) else 1) + 2 + 1
+            if candidate["expires_at"] > next_decision + 1:
                 continue  # prepare() can still hold it at the last safe minute after the first ticket, keeping it longer
             fee = candidate.get("hold_fee_usd", 0)
             limit = self.number(self.program["budget_limit"], self.context(observation, offer, at=now + 3))
@@ -1079,6 +1115,17 @@ class LateSalesController(_Controller):
         return True
 
     def call(self, tool, **arguments):
+        if tool == "claim" and PARALLEL_CLAIM and not getattr(self, "claim_seen", False):
+            # The supplied loop claims the waiver before planning; run it in parallel with the next batch instead
+            # (normally the first hold), which saves the claim's two minutes on the way to the first confirmation.
+            self.claim_seen = True
+            observation = self.world.observe()
+            deadline = observation.get("booking_deadline")
+            # Only when claim (2) + hold (1) + confirm (2) in sequence would miss the first-service deadline.
+            if (self.active(observation) is None and deadline is not None
+                    and observation["virtual_minute"] + 5 > deadline):
+                self.pending_claim = dict(arguments)
+                return {"ok": True, "deferred": True}
         # While an announced forecast is unresolved, keep the supplied wait: prepare() times its backup hold to
         # the last safe minute before the sale closes, and an extra search with its refresh can overrun it.
         pending = any(type(row.get("at")) in (int, float) and row["at"] > self.world.now
@@ -1127,8 +1174,16 @@ class LateSalesController(_Controller):
         if getattr(self, "skip_search_once", False) and actions and actions[0].get("tool") == "search":
             self.skip_search_once = False
             actions = actions[1:]
-            if not actions:
+            if not actions and not getattr(self, "pending_claim", None):
                 return []
+        claim = getattr(self, "pending_claim", None)
+        if claim:
+            self.pending_claim = None
+            claim_action = _action("claim", **claim)
+            if not actions or any(action.get("tool") == "finish" for action in actions):
+                super().batch([claim_action])  # finish must be a separate action
+                return super().batch(actions) if actions else []
+            return super().batch([claim_action] + list(actions))[1:]
         return super().batch(actions)
 
     def prepare(self, observation, booking):
