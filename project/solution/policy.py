@@ -12,8 +12,15 @@ import json
 import re
 from types import SimpleNamespace
 
+# Reasoning effort for full interpretation calls and their repairs (scoped calls keep config.EFFORT).
+# "medium" recovered the team-contributed Basic cases on the leaderboard (Diana's 66da34c);
+# None keeps config.EFFORT for every call.
+FULL_CALL_EFFORT = "medium"
+
 
 def interpret_with_consent_references(api, settings, instructions, payload, schema, label):
+    if FULL_CALL_EFFORT:
+        settings = dict(settings, effort=FULL_CALL_EFFORT)
     observation = {key: payload["observation"][key]
                    for key in ("virtual_minute", "tier", "notices", "operational_sources")}
     payload = dict(payload, observation=observation)
