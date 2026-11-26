@@ -856,6 +856,7 @@ SEARCH_WHILE_CONFIRMING = True  # with a pending forecast, search in a free slot
 HEDGE_FIRST_BOOKING = True      # hold a sheltered backup together with an exposed first ticket when backup sales close early
 UNKNOWN_DELAY_IS_SEVERE = True  # a forecast without a single delay estimate (e.g. a range) is hedged as a severe delay
 VERBATIM_CONSENT = True         # an approval code must appear literally in the notices; restore a dropped prefix
+TRANSFER_RISK = True            # a forecast that a terminal's transfer becomes N minutes is a risk for every service of that mode
 SEVERE_DELAY = 240
 PARALLEL_CLAIM = True       # run the initial waiver claim with the first hold (only when the deadline is tight)
 FIRST_SERVICE_RUSH = True   # confirm the first replacement before a refresh that would miss the deadline
@@ -934,11 +935,48 @@ class LateSalesController(_Controller):
         except Exception:
             return None
 
+    def transfer_risks(self):
+        """Announced transfer risks from the current weather forecast: [(mode, minutes, report_minute)] while pending."""
+        if not TRANSFER_RISK:
+            return []
+        source = self.documents.get("weather-forecast")
+        text = (source or {}).get("text", "")
+        if not text or "transfer" not in text.lower():
+            return []
+        terminals = (("airport", "flight"), ("rail", "train"), ("railway", "train"), ("train station", "train"),
+                     ("coach", "coach"), ("bus", "coach"))
+        risks = []
+        for match in re.finditer(r"([A-Za-z -]{0,40}?)\btransfers? (?:becomes|would become|will become|will be|rises to|increases to)"
+                                 r" (?:about |roughly |around )?(\d+) minutes", text, re.IGNORECASE):
+            place = match.group(1).lower()
+            mode = next((mode for word, mode in terminals if word in place), None)
+            if mode is None:
+                continue
+            minutes = int(match.group(2))
+            if minutes <= self.facts["transfer"].get(mode, 0):
+                continue  # already in effect (or not longer)
+            reports = [row["at"] for row in (self.facts.get("forecasts") or []) if type(row.get("at")) in (int, float)]
+            found = [int(m) for m in re.findall(r"(?:report|notice|decides|decision|settle|update)[^.]{0,80}?virtual minute (\d+)",
+                                                text, re.IGNORECASE)]
+            when = max(reports + found) if (reports or found) else None
+            if when is not None and when > self.world.now:
+                risks.append((mode, minutes, when))
+        return risks
+
+    def offer_facts(self, value, weather=None):
+        result = super().offer_facts(value, weather)
+        extra = (weather or {}).get("transfer:" + str(result.get("mode")))
+        if type(extra) in (int, float):
+            result["meeting_arrival"] = result["arrival_minute"] + max(extra, self.facts["transfer"][result["mode"]])
+        return result
+
     def pending_forecast_modes(self):
         return {row.get("mode") for row in (self.facts.get("forecasts") or [])
-                if type(row.get("at")) in (int, float) and row["at"] > self.world.now}
+                if type(row.get("at")) in (int, float) and row["at"] > self.world.now} | {mode for mode, _, _ in self.transfer_risks()}
 
     def weather_robust(self, offer):
+        if any(mode == offer.get("mode") for mode, _, _ in self.transfer_risks()):
+            return False  # a longer transfer affects sheltered services of that mode too
         return not (offer.get("weather_exposed") and offer.get("mode") in self.pending_forecast_modes())
 
     def ordered_plan(self, observation, booking):
@@ -1029,13 +1067,17 @@ class LateSalesController(_Controller):
         """A sheltered backup for an exposed first ticket when backup sales close before the weather report: a forecast
         estimate can still be raised while the first ticket is being bought, and afterwards the sale may be over."""
         offer = plan["option"]
-        if plan.get("hold") is not None or not offer.get("weather_exposed") or offer.get("mode") not in self.pending_forecast_modes():
+        transfer = [(minutes, at) for mode, minutes, at in self.transfer_risks() if mode == offer.get("mode")]
+        if plan.get("hold") is not None or offer.get("mode") not in self.pending_forecast_modes() or not (
+                offer.get("weather_exposed") or transfer):
             return None
         rows = [row for row in self.facts["forecasts"]
                 if row.get("mode") == offer["mode"] and type(row.get("at")) in (int, float) and row["at"] > self.world.now]
-        when = max(row["at"] for row in rows)
+        when = max([row["at"] for row in rows] + [at for _, at in transfer])
         now = self.world.now
         worst = dict(self.facts["weather"], **{offer["mode"]: 240})
+        if transfer:
+            worst["transfer:" + offer["mode"]] = max(minutes for minutes, _ in transfer)
         booking = dict(offer, id="planned-booking", option_id=offer["id"], kind="transport", status="confirmed",
                        held_at=now + 1, confirmed_at=now + 3)
         best = None
@@ -1199,6 +1241,16 @@ class LateSalesController(_Controller):
             for row in rows:
                 joint[row["mode"]] = max(joint[row["mode"]], row["delay"])
             scenarios.append((joint, max(row["at"] for row in rows)))
+        for mode, minutes, when in self.transfer_risks():
+            # A longer transfer for every service of a mode, alone and together with the announced delays.
+            alone = dict(self.facts["weather"], **{"transfer:" + mode: minutes})
+            scenarios.append((alone, when))
+            if rows:
+                together = dict(self.facts["weather"])
+                for row in rows:
+                    together[row["mode"]] = max(together[row["mode"]], row["delay"])
+                together["transfer:" + mode] = minutes
+                scenarios.append((together, max([when] + [row["at"] for row in rows])))
         def imagined_hold(offer, when):
             fee = offer.get("hold_fee_usd", 0)
             imagined = _copy.deepcopy(observation)
