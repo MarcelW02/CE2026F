@@ -855,6 +855,7 @@ BACKUP_BY_COVERAGE = True      # choose backup holds that cover the most announc
 SEARCH_WHILE_CONFIRMING = True  # with a pending forecast, search in a free slot while a confirmation runs
 HEDGE_FIRST_BOOKING = True      # hold a sheltered backup together with an exposed first ticket when backup sales close early
 UNKNOWN_DELAY_IS_SEVERE = True  # a forecast without a single delay estimate (e.g. a range) is hedged as a severe delay
+VERBATIM_CONSENT = True         # an approval code must appear literally in the notices; restore a dropped prefix
 SEVERE_DELAY = 240
 
 
@@ -885,6 +886,7 @@ class LateSalesController(_Controller):
     def refresh(self, initial=False):
         result = super().refresh(initial)
         if self.program is not None:
+            self.restore_verbatim_consent()
             self.use_untried_consent()  # a re-interpretation may repeat an approval code already refused
         return result
 
@@ -967,6 +969,21 @@ class LateSalesController(_Controller):
             found += re.findall(r"(?i)\b(?:approval|consent|authori[sz]ation)(?:\s+(?:code|token|reference))?\s+"
                                 r"([A-Za-z][\w-]*\d[\w-]*)", text)
         return list(dict.fromkeys(found))
+
+    def restore_verbatim_consent(self):
+        """The prompt asks to drop the word "approval" around the token, so a code written as "approval-xxxx" can be
+        shortened to "xxxx". A code that does not occur literally in the notices is replaced by the one literal token
+        that contains it."""
+        consent = self.facts.get("consent")
+        if not VERBATIM_CONSENT or not isinstance(consent, str) or not consent.strip():
+            return
+        text = " ".join(notice.get("text", "") for notice in self.world.observe()["notices"])
+        tokens = set(re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*[A-Za-z0-9]", text))
+        if consent in tokens:
+            return
+        containing = sorted(token for token in tokens if consent in token)
+        if len(containing) == 1:
+            self.facts["consent"] = containing[0]
 
     def use_untried_consent(self):
         refused = getattr(self, "refused_consents", set())
