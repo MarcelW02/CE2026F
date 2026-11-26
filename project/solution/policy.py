@@ -1075,7 +1075,7 @@ class LateSalesController(_Controller):
         self.last_confirm = None
         if HEDGE_FIRST_BOOKING and booking is None and not plan.get("last_resort") and self.program is not None:
             try:
-                self.extra_hold = self.first_booking_hedge(self.world.observe(), plan)
+                self.extra_hold = self.first_booking_hedge(self.planning_view(self.world.observe()), plan)
             except Exception:
                 self.extra_hold = None
         done = self.buy_last_resort(plan) if plan.get("last_resort") else super().implement(plan, booking)
