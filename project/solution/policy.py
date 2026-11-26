@@ -854,6 +854,8 @@ WEATHER_ROBUST_FIRST = True    # with a pending forecast, prefer a sheltered tic
 BACKUP_BY_COVERAGE = True      # choose backup holds that cover the most announced scenarios first
 SEARCH_WHILE_CONFIRMING = True  # with a pending forecast, search in a free slot while a confirmation runs
 HEDGE_FIRST_BOOKING = True      # hold a sheltered backup together with an exposed first ticket when backup sales close early
+UNKNOWN_DELAY_IS_SEVERE = True  # a forecast without a single delay estimate (e.g. a range) is hedged as a severe delay
+SEVERE_DELAY = 240
 
 
 class LateSalesController(_Controller):
@@ -1115,7 +1117,10 @@ class LateSalesController(_Controller):
     def prepare(self, observation, booking):
         """The supplied prepare() over explicit scenarios: each announced delay alone, plus all of them jointly."""
         rows = [row for row in self.facts["forecasts"]
-                if type(row.get("at")) in (int, float) and type(row.get("delay")) in (int, float) and row["at"] > self.world.now]
+                if type(row.get("at")) in (int, float) and row["at"] > self.world.now
+                and (type(row.get("delay")) in (int, float) or (UNKNOWN_DELAY_IS_SEVERE and row.get("delay") is None
+                                                                and row.get("mode") in ("flight", "train", "coach")))]
+        rows = [dict(row, delay=SEVERE_DELAY if row.get("delay") is None else row["delay"]) for row in rows]
         scenarios = [(dict(self.facts["weather"], **{row["mode"]: row["delay"]}), row["at"]) for row in rows]
         if len({row["mode"] for row in rows}) > 1:
             joint = dict(self.facts["weather"])
