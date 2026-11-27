@@ -194,6 +194,79 @@ def _weather_shortcut(payload, last):
             "facts": facts}
 
 
+_SUPPLEMENT = re.compile(
+    r"I can now stretch the total to USD (\d+) for a step-free coach that gets me to the client by (\d{1,2}):(\d{2}), "
+    r"as long as earlier ticket cancellations have retained no more than USD (\d+)\. "
+    r"This replaces the USD (\d+) ceiling only for a booking meeting all those conditions\. "
+    r"The ordinary USD (\d+) ceiling still covers every other choice\. "
+    r"The appointment and the provider's refund terms stay as they were; "
+    r"the supplement is not another USD (\d+) on top\.")
+_SUPPLEMENT_NOTICE = ("A limited coach recovery supplement is now approved. Read the revised spending approval; "
+                      "the arrival obligation and fare conditions have not changed.")
+_CARRIER_NOTICE = re.compile(
+    r"The traveller can no longer use ([A-Za-z0-9]+)\. This carrier restriction is separate from the coach "
+    r"spending supplement; the arrival deadline and fare rider stay unchanged\.")
+_FLAT_FARE = re.compile(
+    r"Base fare fields describe ordinary cancellation: these fee fares normally retain USD \d+\. "
+    r"The following provider terms override that amount\. They are fixed when each ticket is confirmed; "
+    r"the conditions are checked when cancellation actually completes\. Cancellation uses the outbound consent\. "
+    r"A hold is not a confirmed replacement, and overlapping confirmed outbounds remain forbidden\.\n"
+    r"If a ticket is cancelled, the provider retains USD (\d+) and refunds the rest\.")
+
+
+def _supplement_shortcut(payload, last):
+    """Standard 'coach supplement + carrier exclusion' amendment compiled locally.
+
+    Fires only when exactly these two standard notices are new, only the spending approval
+    changed, fares keep one flat retained amount, and the old ceiling equals the text's
+    ordinary ceiling. Anything else returns None and goes to the model as before."""
+    prev = payload.get("previous")
+    if last is None or not prev or not isinstance(prev.get("facts"), dict):
+        return None
+    notices, earlier = payload["observation"]["notices"], last["observation"]["notices"]
+    if len(notices) != len(earlier) + 2 or notices[:-2] != earlier:
+        return None
+    first, second = notices[-2], notices[-1]
+    if first["kind"] != "user_update" or second["kind"] != "user_update" or first["text"] != _SUPPLEMENT_NOTICE:
+        return None
+    carrier = _CARRIER_NOTICE.fullmatch(second["text"])
+    sources = payload["observation"].get("operational_sources") or {}
+    spend = (sources.get("budget_limit") or {}).get("id")
+    if not carrier or spend != "request-contract" or sources.get("arrival_deadline") != \
+            (last["observation"].get("operational_sources") or {}).get("arrival_deadline"):
+        return None
+    docs, before = {d["id"]: d for d in payload["documents"]}, {d["id"]: d for d in last["documents"]}
+    request, old_request = docs.pop(spend, None), before.pop(spend, None)
+    if not request or not old_request or request["version"] <= old_request["version"] or docs != before:
+        return None
+    flat = _FLAT_FARE.fullmatch(docs.get("fare-contract", {}).get("text", ""))
+    retained = {json.dumps(v) for v in prev["refund_terms"].values()}
+    if not flat or retained != {flat.group(1)}:
+        return None
+    if any((o.get("refund_contract_source") or {}).get("id") != "fare-contract" for o in payload["offers"]):
+        return None
+    text = _SUPPLEMENT.fullmatch(request["text"])
+    if not text:
+        return None
+    raised, hour, minute, fees, replaced, ordinary, _ = text.groups()
+    if replaced != ordinary or not isinstance(prev["budget_limit"], int) or int(ordinary) != prev["budget_limit"] \
+            or int(raised) <= int(ordinary) or int(hour) > 23 or int(minute) > 59:
+        return None
+    facts = json.loads(json.dumps(prev["facts"]))
+    if carrier.group(1) not in facts["avoid_carriers"]:
+        facts["avoid_carriers"].append(carrier.group(1))
+    budget = {"op": "if", "when": {"op": "and", "args": [
+        {"op": "eq", "left": {"var": "candidate.mode"}, "right": "coach"},
+        {"var": "candidate.step_free"},
+        {"op": "le", "left": {"var": "candidate.meeting_arrival"}, "right": int(hour) * 60 + int(minute)},
+        {"op": "le", "left": {"var": "state.retained_fees"}, "right": int(fees)}]},
+        "then": int(raised), "else": int(ordinary)}
+    amount = int(flat.group(1))
+    return {"budget_limit": budget, "arrival_deadline": prev["arrival_deadline"],
+            "refund_groups": [{"offer_ids": [o["id"] for o in payload["offers"]], "retained": amount}],
+            "facts": facts}
+
+
 class _NormalizingAPI:
     """Pass-through to the supplied API (same accounting) that repairs known
     interpretation slips: sentence-valued or mis-copied codes, a wrong hotel
@@ -226,7 +299,7 @@ class _NormalizingAPI:
         last, self._last = self._last, payload
         if isinstance(payload, dict) and "observation" in payload:
             try:
-                shortcut = _weather_shortcut(payload, last)
+                shortcut = _weather_shortcut(payload, last) or _supplement_shortcut(payload, last)
             except (KeyError, TypeError, ValueError):
                 shortcut = None
             if shortcut is not None:
