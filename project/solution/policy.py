@@ -857,6 +857,7 @@ HEDGE_FIRST_BOOKING = True      # hold a sheltered backup together with an expos
 UNKNOWN_DELAY_IS_SEVERE = True  # a forecast without a single delay estimate (e.g. a range) is hedged as a severe delay
 VERBATIM_CONSENT = True         # an approval code must appear literally in the notices; restore a dropped prefix
 TRANSFER_RISK = True            # a forecast that a terminal's transfer becomes N minutes is a risk for every service of that mode
+PARALLEL_REBOOK = True          # hold the replacement and cancel the old ticket in one batch when that saves a refund
 SEVERE_DELAY = 240
 PARALLEL_CLAIM = True       # run the initial waiver claim with the first hold (only when the deadline is tight)
 FIRST_SERVICE_RUSH = True   # confirm the first replacement before a refresh that would miss the deadline
@@ -987,12 +988,41 @@ class LateSalesController(_Controller):
         plans = [plan for offer in self.candidates(observation)
                  if not booking or offer["id"] != booking["option_id"]
                  if (plan := self.purchase_plan(observation, offer, booking)) is not None]
+        if PARALLEL_REBOOK and booking:
+            plans += self.parallel_rebook_plans(observation, booking, plans)
         plans.sort(key=lambda plan: (not plan["preferred"], not self.weather_robust(plan["option"]), plan["expense"],
                                      plan["loss"], plan["option"]["arrival_minute"]))
         if booking and self.keep_valid(observation, booking):
             if booking["mode"] == self.facts["preferred"] or not plans or not plans[0]["preferred"]:
                 return None
         return plans[0] if plans else None
+
+    def parallel_rebook_plans(self, observation, booking, sequential):
+        """Rebooking normally holds the replacement (1 minute) before cancelling (2 minutes). When a refund depends on
+        when the cancellation completes, running both in one batch finishes the cancellation a minute earlier. Only
+        variants that are new or cheaper than the sequential plan for the same offer are returned."""
+        now = observation["virtual_minute"]
+        best = {plan["option"]["id"]: plan["expense"] for plan in sequential}
+        extra = []
+        for offer in self.candidates(observation):
+            if offer["id"] == booking["option_id"] or now + 1 >= offer["expires_at"] or any(
+                    hold["status"] == "held" and hold["option_id"] == offer["id"] for hold in observation["holds"]):
+                continue
+            try:
+                plan = self.purchase_plan(observation, offer, booking, at=now - 1)  # cancel done at now+2, confirm at now+4
+            except Exception:
+                plan = None
+            if plan is not None and plan["expense"] < best.get(offer["id"], float("inf")):
+                extra.append(dict(plan, parallel_cancel=True))
+        return extra
+
+    def buy_with_parallel_cancel(self, plan, booking):
+        results = self.batch([_action("hold", id=plan["option"]["id"]),
+                              _action("cancel", id=booking["id"], code=self.facts["consent"])])
+        self.trace.append(dict(kind="parallel_rebook", option_id=plan["option"]["id"], results=_copy.deepcopy(results)))
+        if not (results[0].get("ok") and results[1].get("ok")):
+            return False
+        return self.buy_last_resort(dict(plan, hold=results[0]["hold"]))
 
     def last_resort(self, observation):
         now = observation["virtual_minute"]
@@ -1120,7 +1150,10 @@ class LateSalesController(_Controller):
                 self.extra_hold = self.first_booking_hedge(self.planning_view(self.world.observe()), plan)
             except Exception:
                 self.extra_hold = None
-        done = self.buy_last_resort(plan) if plan.get("last_resort") else super().implement(plan, booking)
+        if plan.get("parallel_cancel") and booking is not None:
+            done = self.buy_with_parallel_cancel(plan, booking)
+        else:
+            done = self.buy_last_resort(plan) if plan.get("last_resort") else super().implement(plan, booking)
         self.extra_hold = None
         refusal = self.last_confirm
         if not done and refusal is not None and not refusal.get("ok") and not refusal.get("interrupted"):
