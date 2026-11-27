@@ -10,7 +10,9 @@ PROJECT_PROMPT = (
     "ARRIVAL RULE: the base deadline T1 applies to every ticket unless an exception condition is met. "
     "Text like 'arrive by T1; I can accept T2 when C; that concession is withdrawn when D' compiles to "
     "if (C and not D) then T2 else T1. Tickets outside C (other modes, other price ranges) keep the "
-    "stricter T1; never give the relaxed time to tickets that fail the stated condition."
+    "stricter T1; never give the relaxed time to tickets that fail the stated condition. "
+    "TIME RULE: a condition such as 'by virtual minute N' or 'no later than minute N' compares the clock "
+    "variable state.now with N (state.now <= N). Never compare a fee, price or other field with a minute number."
 )
 ROLE_PROMPTS = deepcopy(FP_EXTRACTION_ROLE_PROMPTS)
 
