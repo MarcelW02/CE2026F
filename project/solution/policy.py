@@ -157,8 +157,22 @@ class _NormalizingAPI:
     def __getattr__(self, name):
         return getattr(self._api, name)
 
+    def _call(self, *args, **kwargs):
+        """Call the API; if the reply was not pure JSON (the model sometimes emits a
+        stray text message before the real object), retry. The second retry uses
+        reasoning effort low. Every attempt is made and counted by the supplied API."""
+        for attempt in range(3):
+            try:
+                return self._api.json(*args, **kwargs)
+            except json.JSONDecodeError:
+                if attempt == 2:
+                    raise
+                if attempt == 1 and args and isinstance(args[0], dict) \
+                        and args[0].get("effort") == "none":
+                    args = (dict(args[0], effort="low"),) + tuple(args[1:])
+
     def json(self, *args, **kwargs):
-        result = self._api.json(*args, **kwargs)
+        result = self._call(*args, **kwargs)
         payload = args[2] if len(args) > 2 else kwargs.get("payload")
         if not isinstance(result, dict) or not isinstance(payload, dict):
             return result
@@ -178,7 +192,7 @@ class _NormalizingAPI:
         if problem and len(args) >= 5:
             note = ("\nREPAIR: your previous reply was rejected: " + problem +
                     ". Return the complete corrected reply for the same schema.")
-            retry = self._api.json(args[0], args[1] + note, *args[2:])
+            retry = self._call(args[0], args[1] + note, *args[2:])
             if isinstance(retry, dict):
                 if isinstance(retry.get("facts"), dict):
                     if "consent" in retry["facts"]:

@@ -3,13 +3,13 @@ from framework.settings import settings
 from framework.fp_agents import travel_config
 from . import prompts
 
-MODEL = "gpt-5.6-luna"
+MODEL = "gpt-6-luna"
 EFFORT = "low"
 VERBOSITY = "low"
 MAX_OUTPUT_TOKENS = 4096
 TEMPERATURE = None
 TOP_P = None
-ARCHITECTURE = "hybrid_multi"
+ARCHITECTURE = "hybrid_single"
 # False freezes model-extracted fields after the first interpretation in the hybrid.
 # True enables selective re-interpretation; live observations still update in both.
 REFRESH_CONTEXT = True

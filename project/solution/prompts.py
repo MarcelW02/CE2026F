@@ -3,7 +3,7 @@ from framework.fp_agents import FP_EXTRACTION_ROLE_PROMPTS
 from copy import deepcopy
 
 PROJECT_PROMPT = (
-    "Help the traveler repair the trip. Use the available tools, then stop when done. "
+    "Help the traveler repair the trip. Reply with ONLY the single JSON object required by the schema: no text, preamble or explanation before or after it. "
     "FORMAT RULE: facts.consent and facts.waiver.code must each be ONLY the bare literal code "
     "token copied from the observed text (one word, no spaces), e.g. 'consent-123456' or "
     "'proof-123456'. Never copy the sentence around the code, such as 'covers the outbound...'. "
