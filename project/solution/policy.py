@@ -267,6 +267,288 @@ def _supplement_shortcut(payload, last):
             "facts": facts}
 
 
+def _tpl(text):
+    """Exact-wording template: @N@ number, @T@ clock time, @W@ one word/code, @M@ travel mode."""
+    pattern = re.escape(text)
+    for token, group in (("@N@", r"(\d+)"), ("@T@", r"(\d{1,2}:\d{2})"), ("@W@", r"([A-Za-z0-9][A-Za-z0-9_\-]*)"),
+                         ("@M@", r"(flight|train|coach)")):
+        pattern = pattern.replace(re.escape(token), group)
+    return re.compile(pattern, re.DOTALL)
+
+
+def _minutes(clock):
+    hour, minute = clock.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+_INITIAL_HEAD = re.compile(
+    r"Repair my cancelled outbound to [A-Za-z ]+\. Prefer (flight|train|coach) whenever a suitable (?:flight|train|coach) is affordable\. "
+    r"I require step-free travel\. (?:Do not use ([A-Za-z0-9]+)\. All other listed carriers are permitted\.|All listed carriers are permitted\.) "
+    r"Keep the existing hotel and my colleague's return unchanged, and claim the hotel charge waiver\. "
+    r"Approval ([A-Za-z0-9][A-Za-z0-9_\-]*) covers my outbound and its permitted cancellation, subject to the spending conditions in request-contract\. "
+    r"Read arrival-contract for the binding arrival obligation, transport-guide for transfers, and fare-contract for actual cancellation refunds\. "
+    r"A first confirmed replacement is required by virtual minute \d+\. ")
+_INITIAL_TAILS = tuple(_tpl(t) for t in (
+    "Verify the booking before handing it over at or after minute @N@. Clock times and arrival minutes refer to local time after midnight; "
+    "virtual minutes measure elapsed tool time. Spending authorization is checked when a charged action completes. "
+    "A later lower allowance does not revoke an earlier authorized payment.",
+    "I may send partial changes later. Keep checking current notices through minute @N@ and finish by minute @N@. "
+    "Clock times and arrival minutes refer to local time after midnight; virtual minutes measure elapsed tool time. "
+    "Spending authorization is checked when a charged action completes. A later lower allowance does not revoke an earlier authorized payment.",
+    "I may send partial changes later. Keep checking current notices through minute @N@ and finish by minute @N@. "
+    "Read weather-forecast before the recovery sales close. The announced risk is uncertain; a later operating notice will report what actually happened. "
+    "Clock times and arrival minutes refer to local time after midnight; virtual minutes measure elapsed tool time. "
+    "Spending authorization is checked when a charged action completes. A later lower allowance does not revoke an earlier authorized payment."))
+
+_PLAIN_BUDGETS = tuple(_tpl(t) for t in (
+    "I approve total additional spending up to USD @N@, including retained ticket charges and any hotel fee.",
+    "The approved total for this repair is USD @N@, including retained charges and any hotel fee. "
+    "The later coach arrival concession below does not increase this amount.",
+    "Total additional spending may not exceed USD @N@. Count the current ticket, all amounts retained on earlier cancelled tickets, "
+    "and any hotel charge still payable.",
+    "Total additional spending, including retained charges and any hotel fee, is limited to USD @N@."))
+_EMERGENCY_BUDGET = _tpl(
+    "My normal total allowance is USD @N@. If actual operating information confirms a flight delay of at least thirty minutes, "
+    "the emergency ceiling is USD @N@ for payments completed no later than virtual minute @N@. After that service window, "
+    "new payments are again limited to USD @N@. A forecast is not enough to open the emergency allowance. "
+    "Both amounts include retained charges and any hotel fee.")
+_RISING_BUDGET = _tpl(
+    "The total spending allowance is USD @N@. It rises to USD @N@ only if an observed operating notice reports an actual @M@ delay "
+    "of at least @N@ minutes. A forecast or risk warning does not activate the supplement. Count retained cancellation charges and any "
+    "hotel charge in either ceiling. No further permission is needed after the stated condition actually occurs.")
+
+_MODE_BUDGET = _tpl(
+    "For my outbound, authorize total additional spending up to USD @N@ when the purchased ticket is @M@. "
+    "For another mode, the total ceiling is USD @N@. Each total includes retained cancellation charges and the hotel charge. "
+    "A higher allowance for a different trip does not apply.")
+_QUOTE_BUDGET = _tpl(
+    "For this trip, a qualifying quote is a currently available step-free service, operated by any carrier other than @W@, "
+    "that gets me to the client by @T@. Use the cheapest such quote as the spending reference. "
+    "I approve that fare plus USD @N@ for the whole repair, with an absolute ceiling of USD @N@. "
+    "If no quote qualifies, the ceiling is USD @N@. This total includes the ticket, retained charges and any hotel amount still due; "
+    "the USD @N@ is not a second allowance. For these offer comparisons, currently available quotes include unheld inventory still on sale "
+    "and the particular option now being considered if your own live hold preserves it after sales close. "
+    "Other held options are not automatically included in that quote set; a condition that calls for a live hold checks held options separately.")
+_ARRIVAL_REGISTRATION = _tpl(
+    "The meeting begins at @T@, but registration at the client site closes at @T@ and is required for entry. "
+    "Arrive at the client by @T@. Optional coffee after the meeting does not change this obligation.")
+_TICKET_LINE = re.compile(r"Ticket ([A-Za-z0-9_\-]+): (.*)", re.DOTALL)
+_TICKET_RULES = tuple(_tpl(t) for t in (
+    "Ordinary cancellation retains USD @N@; there is no additional exception.",
+    "ordinary cancellation retains USD @N@; there is no additional exception.",
+    "Cancellation completed by virtual minute @N@, inclusive, receives a full refund. Later cancellation retains USD @N@.",
+    "Cancellation completed by minute @N@ retains USD @N@, otherwise USD @N@."))
+_ARRIVALS = tuple(_tpl(t) for t in (
+    "Reach the client by @T@, including the current transfer.",
+    "Arrive at the client by @T@, including the current transfer. The emergency spending window does not change the appointment.",
+    "Reach the client by @T@. Transfers in transport-guide count toward this deadline.",
+    "The client needs me there by @T@, including the current transfer from the terminal.",
+    "Reach the client by @T@ after adding the current terminal transfer.",
+    "The client needs arrival by @T@, including the terminal transfer. The optional lunch is at @T@."))
+_ARRIVAL_COACH = _tpl(
+    "Please arrive at the client by @T@. I can accept @T@ when the selected service is a coach. "
+    "That concession is withdrawn for coach tickets priced above USD @N@: those tickets must still get me there by @T@. "
+    "These are client arrival times, so include the transfer.")
+
+_FARE_HEAD = _tpl(
+    "Base fare fields describe ordinary cancellation: these fee fares normally retain USD @N@. The following provider terms override that amount. "
+    "They are fixed when each ticket is confirmed; the conditions are checked when cancellation actually completes. "
+    "Cancellation uses the outbound consent. A hold is not a confirmed replacement, and overlapping confirmed outbounds remain forbidden.\n")
+_FARE_FLAT = tuple(_tpl(t) for t in (
+    "Cancellation retains USD @N@ from the ticket price. The balance is refunded.",
+    "If a ticket is cancelled, the provider retains USD @N@ and refunds the rest."))
+_FARE_EXPOSED = _tpl(
+    "Ordinary cancellation retains USD @N@. An exposed flight ticket receives a full refund when cancellation completes by virtual minute @N@ "
+    "and the actual flight delay is at least thirty minutes. Both requirements must be met. "
+    "Sheltered flights and other modes keep the ordinary charge, even during the disruption.")
+
+_BULLETIN = _tpl(
+    "Claim evidence type @W@, code @W@, version @N@, before virtual minute @N@. "
+    "A successful claim removes the USD @N@ charge while retaining the room.")
+_HOTEL_TERMS = _tpl("Keep the room. Read the linked hotel-bulletin for the current evidence that removes the USD @N@ charge.")
+_GUIDE = _tpl("Add @N@ minutes to terminal arrival for flight, train or coach. "
+              "The result is arrival at the client, not terminal arrival.")
+_PROFILE = re.compile(
+    r"Use a suitable (flight|train|coach) if one is affordable\. Keep step-free access\. "
+    r"The colleague's separate return and our existing hotel are outside this request\.(?: Do not use ([A-Za-z0-9]+)\.)?")
+_FORECAST_A = _tpl(
+    "The forecast gives a @N@% chance of weather delays to exposed @M@ services. The current delay estimate is @N@ minutes; "
+    "this estimate is not an observed operating delay. The actual outcome may be harmless or may require a different service. "
+    "A final operating report arrives at virtual minute @N@. Recovery options with a sales cutoff of virtual minute @N@ must be held before sales close. "
+    "A live hold can be confirmed after the sales cutoff until its own expiry. "
+    "Its visible deposit is credited toward the ticket if confirmed and otherwise remains charged.")
+_FORECAST_B = _tpl(
+    "The @M@ operator reports a credible risk of a @N@-minute delay to the exposed departures. This is a forecast, not an actual delay. "
+    "A final operating notice is scheduled for minute @N@. The two recovery departures are sheltered from this weather disruption, "
+    "but their sales close at minute @N@. A live hold remains usable after sales close until its own expiry. "
+    "Each recovery hold charges USD @N@ immediately. That USD @N@ is credited toward the quoted ticket price if confirmed; "
+    "an unused hold keeps the USD @N@ charge. Other listed holds cost zero. A hold does not activate the emergency spending supplement. "
+    "Plan the deposit as part of current spending.")
+_KNOWN_SOURCES = {"arrival-contract", "fare-contract", "hotel-bulletin", "hotel-terms", "request-contract",
+                  "transport-guide", "traveler-profile", "weather-forecast"}
+
+
+def _opening_reader(payload):
+    """Compile the standard opening request locally (no model call).
+
+    Every source must match a known template exactly; any difference, any extra
+    source or any unexpected offer returns None and the model compiles as before."""
+    if payload.get("previous") is not None:
+        return None
+    observation, documents, offers = payload["observation"], payload["documents"], payload["offers"]
+    notices = observation["notices"]
+    if len(notices) != 1 or notices[0]["kind"] != "initial_request" or not offers:
+        return None
+    docs = {d["id"]: d for d in documents}
+    if len(docs) != len(documents) or not set(docs) <= _KNOWN_SOURCES \
+            or not {"arrival-contract", "fare-contract", "hotel-bulletin", "request-contract", "transport-guide",
+                    "traveler-profile"} <= set(docs):
+        return None
+    if {s["id"] for s in observation["source_catalog"]} != set(docs):
+        return None
+    sources = observation["operational_sources"]
+    if sources["budget_limit"]["id"] != "request-contract" or sources["arrival_deadline"]["id"] != "arrival-contract":
+        return None
+    text = notices[0]["text"]
+    head = _INITIAL_HEAD.match(text)
+    if not head or not any(t.fullmatch(text[head.end():]) for t in _INITIAL_TAILS):
+        return None
+    preferred, avoid, consent = head.groups()
+    profile = _PROFILE.fullmatch(docs["traveler-profile"]["text"])
+    if not profile or profile.group(1) != preferred or profile.group(2) != avoid:
+        return None
+    guide = _GUIDE.fullmatch(docs["transport-guide"]["text"])
+    bulletin = _BULLETIN.fullmatch(docs["hotel-bulletin"]["text"])
+    if not guide or not bulletin or ("hotel-terms" in docs and not _HOTEL_TERMS.fullmatch(docs["hotel-terms"]["text"])):
+        return None
+    topic, code = bulletin.group(1), bulletin.group(2)
+    transfer = int(guide.group(1))
+    # arrival deadline
+    arrival_text, arrival = docs["arrival-contract"]["text"], None
+    for template in _ARRIVALS:
+        m = template.fullmatch(arrival_text)
+        if m:
+            arrival = _minutes(m.group(1))
+    m = _ARRIVAL_COACH.fullmatch(arrival_text)
+    if m:
+        strict, relaxed, cap, strict2 = _minutes(m.group(1)), _minutes(m.group(2)), int(m.group(3)), _minutes(m.group(4))
+        if strict != strict2 or relaxed <= strict:
+            return None
+        arrival = {"op": "if", "when": {"op": "and", "args": [
+            {"op": "eq", "left": {"var": "candidate.mode"}, "right": "coach"},
+            {"op": "le", "left": {"var": "candidate.price"}, "right": cap}]}, "then": relaxed, "else": strict}
+    m = _ARRIVAL_REGISTRATION.fullmatch(arrival_text)
+    if m and m.group(2) == m.group(3):
+        arrival = _minutes(m.group(2))
+    if arrival is None:
+        return None
+    # spending ceiling
+    budget_text, budget, emergency_mode = docs["request-contract"]["text"], None, None
+    for template in _PLAIN_BUDGETS:
+        m = template.fullmatch(budget_text)
+        if m:
+            budget = int(m.group(1))
+    m = _EMERGENCY_BUDGET.fullmatch(budget_text)
+    if m:
+        normal, high, until, again = (int(x) for x in m.groups())
+        if normal != again or high <= normal:
+            return None
+        budget, emergency_mode = {"op": "if", "when": {"op": "and", "args": [
+            {"op": "ge", "left": {"var": "state.weather.flight"}, "right": 30},
+            {"op": "le", "left": {"var": "state.now"}, "right": until}]}, "then": high, "else": normal}, "flight"
+    m = _RISING_BUDGET.fullmatch(budget_text)
+    if m:
+        normal, high, mode, delay = int(m.group(1)), int(m.group(2)), m.group(3), int(m.group(4))
+        if high <= normal:
+            return None
+        budget, emergency_mode = {"op": "if", "when": {"op": "ge", "left": {"var": "state.weather." + mode},
+                                                       "right": delay}, "then": high, "else": normal}, mode
+    m = _MODE_BUDGET.fullmatch(budget_text)
+    if m:
+        budget = {"op": "if", "when": {"op": "eq", "left": {"var": "candidate.mode"}, "right": m.group(2)},
+                  "then": int(m.group(1)), "else": int(m.group(3))}
+    m = _QUOTE_BUDGET.fullmatch(budget_text)
+    if m:
+        banned, limit, extra, ceiling, none_ceiling, extra2 = m.group(1), _minutes(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6))
+        if extra != extra2 or not (preferred and limit):
+            return None
+        qualifying = {"op": "and", "args": [
+            {"var": "item.step_free"}, {"op": "ne", "left": {"var": "item.carrier"}, "right": banned},
+            {"op": "le", "left": {"var": "item.meeting_arrival"}, "right": limit}]}
+        budget = {"op": "if", "when": {"op": "exists", "pool": "offers", "where": qualifying},
+                  "then": {"op": "min", "args": [ceiling, {"op": "add", "args": [
+                      {"op": "minimum", "pool": "offers", "where": qualifying,
+                       "value": {"var": "item.price"}, "default": ceiling}, extra]}]},
+                  "else": none_ceiling}
+    if budget is None:
+        return None
+    # fares: per-offer retained amount
+    fare = docs["fare-contract"]["text"]
+    head_match = _FARE_HEAD.match(fare)
+    if not head_match:
+        return None
+    body, retained = fare[head_match.end():], None
+    for template in _FARE_FLAT:
+        m = template.fullmatch(body)
+        if m:
+            retained = lambda offer, n=int(m.group(1)): n
+    m = _FARE_EXPOSED.fullmatch(body)
+    if m:
+        base, cutoff = int(m.group(1)), int(m.group(2))
+        conditional = {"op": "if", "when": {"op": "and", "args": [
+            {"op": "le", "left": {"var": "state.now"}, "right": cutoff},
+            {"op": "ge", "left": {"var": "state.weather.flight"}, "right": 30}]}, "then": 0, "else": base}
+        retained = lambda offer: conditional if offer.get("mode") == "flight" and offer.get("weather_exposed") else base
+    if retained is None and body.startswith("Ticket "):
+        rules = {}
+        for line in body.split("\n"):
+            t = _TICKET_LINE.fullmatch(line)
+            if not t or t.group(1) in rules:
+                return None
+            for index, template in enumerate(_TICKET_RULES):
+                r = template.fullmatch(t.group(2))
+                if r:
+                    n = [int(x) for x in r.groups()]
+                    rules[t.group(1)] = n[0] if index < 2 else (
+                        {"op": "if", "when": {"op": "le", "left": {"var": "state.now"}, "right": n[0]},
+                         "then": 0, "else": n[1]} if index == 2 else
+                        {"op": "if", "when": {"op": "le", "left": {"var": "state.now"}, "right": n[0]},
+                         "then": n[1], "else": n[2]})
+                    break
+            else:
+                return None
+        if set(rules) != {o["id"] for o in offers}:
+            return None
+        retained = lambda offer: rules[offer["id"]]
+    if retained is None:
+        return None
+    if any((o.get("refund_contract_source") or {}).get("id") != "fare-contract" for o in offers):
+        return None
+    # forecasts
+    forecasts = []
+    if "weather-forecast" in docs:
+        forecast = docs["weather-forecast"]["text"]
+        a, b = _FORECAST_A.fullmatch(forecast), _FORECAST_B.fullmatch(forecast)
+        if a:
+            chance, mode, delay, report = int(a.group(1)), a.group(2), int(a.group(3)), int(a.group(4))
+            forecasts = [{"mode": mode, "delay": delay, "at": report, "probability": chance / 100}]
+        elif b:
+            mode, delay, report = b.group(1), int(b.group(2)), int(b.group(3))
+            forecasts = [{"mode": mode, "delay": delay, "at": report, "probability": None}]
+        else:
+            return None
+    elif "weather-forecast" in text:
+        return None
+    return {"budget_limit": budget, "arrival_deadline": arrival,
+            "refund_groups": [{"offer_ids": [o["id"]], "retained": retained(o)} for o in offers],
+            "facts": {"consent": consent, "transfer": {"flight": transfer, "train": transfer, "coach": transfer},
+                      "preferred": preferred, "requires_step_free": True,
+                      "avoid_carriers": [avoid] if avoid else [],
+                      "weather": {"flight": 0, "train": 0, "coach": 0},
+                      "waiver": {"topic": topic, "code": code, "version": docs["hotel-bulletin"]["version"]},
+                      "forecasts": forecasts}}
+
+
 class _NormalizingAPI:
     """Pass-through to the supplied API (same accounting) that repairs known
     interpretation slips: sentence-valued or mis-copied codes, a wrong hotel
@@ -299,7 +581,7 @@ class _NormalizingAPI:
         last, self._last = self._last, payload
         if isinstance(payload, dict) and "observation" in payload:
             try:
-                shortcut = _weather_shortcut(payload, last) or _supplement_shortcut(payload, last)
+                shortcut = _opening_reader(payload) or _weather_shortcut(payload, last) or _supplement_shortcut(payload, last)
             except (KeyError, TypeError, ValueError):
                 shortcut = None
             if shortcut is not None:
