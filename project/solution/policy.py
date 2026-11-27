@@ -1,17 +1,19 @@
 """EDITABLE: routing, memory, planning and the agent interaction loop.
- 
+
 Keep additional policy functions/classes here. Model calls use api.json/api.decide;
 all actions must use the supplied world interface. Do not import the evaluator,
 read future events, inspect _spec/_rules, or choose actions by case-ID lookup.
 """
 from framework.fp_agents import run_travel_agent as supplied_agent, travel_route
+from framework.operational_expressions import validate_expression
+import difflib
 import json
 import re
- 
- 
+
+
 def choose_offer_with_decisions(observation, trip_state, offers, api):
     """Optional paid proposal; solve does not call this helper by default.
- 
+
     Pass only current observed offers and interpreted evidence. The result does
     not execute a booking. Recheck its suitability and tool dependencies before
     acting, and retain the returned decision in your diagnostic traces.
@@ -37,61 +39,165 @@ def choose_offer_with_decisions(observation, trip_state, offers, api):
     selected = decision["answers"][0]["choice"]
     return dict(offer_id=bound[selected]["id"] if selected in bound else None,
                 decision=decision)
- 
- 
+
+
 def route(observation, memory):
     """Choose transport, hotel and/or traveler from observed changes.
- 
+
     The supplied loop passes a copy of its routing metadata, not its complete
     parsed trip state. Return domain names; edits to this argument do not persist.
     """
     return travel_route(observation, memory)
- 
- 
-def _bare_code(text, payload_text):
-    """Reduce a code the model returned inside a sentence to the single literal token.
- 
-    Only observed text is used: the token must contain a digit (or a hyphen as a
-    fallback) and is preferred when it literally occurs in the observed payload.
-    No prefix or length is assumed. A value that is already one token is unchanged.
+
+
+_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*[A-Za-z0-9]")
+
+
+def _tokens(text):
+    return list(dict.fromkeys(t for t in _TOKEN.findall(text) if len(t) >= 5))
+
+
+def _snap_code(value, text):
+    """Snap a model-copied code to a literal token of the observed text.
+
+    Models sometimes return a whole sentence, drop a prefix, or lose the last
+    character of a long code. A value that already occurs literally is kept.
+    Otherwise the closest observed token containing a digit is used. No code
+    prefix or length is assumed.
     """
-    if not isinstance(text, str) or not re.search(r"\s", text.strip()):
-        return text
-    tokens = [t.strip(".,;:!?()[]\"'") for t in text.split()]
-    tokens = [t for t in tokens if t]
-    for test in (lambda t: any(c.isdigit() for c in t), lambda t: "-" in t):
-        found = [t for t in tokens if test(t)]
-        if found:
-            seen = [t for t in found if t in payload_text]
-            return (seen or found)[0]
-    return text
- 
- 
+    if not isinstance(value, str):
+        return value
+    tokens = _tokens(text)
+    if value in tokens:
+        return value
+    pieces = [t for t in _TOKEN.findall(value) if len(t) >= 5]
+    for piece in pieces:                       # code inside a sentence
+        if piece in tokens and any(c.isdigit() for c in piece):
+            return piece
+    digit_tokens = [t for t in tokens if any(c.isdigit() for c in t)]
+    for piece in (pieces or [value.strip()]):
+        contained = [t for t in digit_tokens if piece in t or t in piece]
+        if contained:                           # prefix dropped / extra words
+            return max(contained, key=len) if piece in max(contained, key=len) else min(contained, key=len)
+        best = max(digit_tokens, key=lambda t: difflib.SequenceMatcher(None, piece, t).ratio(), default=None)
+        if best and difflib.SequenceMatcher(None, piece, best).ratio() >= 0.8:
+            return best                         # a character was lost or changed
+    return value
+
+
+def _bulletin(payload):
+    for doc in (payload or {}).get("documents", []) if isinstance(payload, dict) else []:
+        if doc.get("id") == "hotel-bulletin":
+            return doc
+    return None
+
+
+def _fix_waiver(waiver, payload, text):
+    """Use the current observed bulletin for the evidence type, code and version."""
+    doc = _bulletin(payload)
+    if doc is None:
+        waiver["code"] = _snap_code(waiver.get("code"), text)
+        return
+    body = doc.get("text", "")
+    literal = set(_TOKEN.findall(body))
+    topic = re.search(r"evidence type\s+([A-Za-z0-9_\-]*[A-Za-z0-9])", body)
+    code = re.search(r"\bcode\s+([A-Za-z0-9_\-]*[A-Za-z0-9])", body)
+    if topic and waiver.get("topic") not in literal:
+        waiver["topic"] = topic.group(1)
+    if code and waiver.get("code") not in literal:
+        waiver["code"] = code.group(1)
+    elif not code:
+        waiver["code"] = _snap_code(waiver.get("code"), body)
+    if isinstance(doc.get("version"), int):
+        waiver["version"] = doc["version"]
+
+
+def _unbind_item(expr, bound=False):
+    """`item` exists only inside exists/minimum; outside it means the ticket itself."""
+    if isinstance(expr, list):
+        return [_unbind_item(e, bound) for e in expr]
+    if not isinstance(expr, dict):
+        return expr
+    if set(expr) == {"var"} and isinstance(expr["var"], str):
+        if not bound and expr["var"].startswith("item."):
+            return {"var": "booking." + expr["var"][5:]}
+        return expr
+    quantifier = expr.get("op") in ("exists", "minimum")
+    return {k: _unbind_item(v, bound or (quantifier and k in ("where", "value")))
+            for k, v in expr.items()}
+
+
+def _reply_problem(result, payload):
+    """Same structural checks the framework applies later; None when acceptable."""
+    try:
+        for key in ("budget_limit", "arrival_deadline"):
+            if key in result:
+                validate_expression(result[key], result_kind="number")
+        if "refund_groups" in result:
+            for group in result["refund_groups"]:
+                validate_expression(group["retained"], result_kind="refund")
+            seen = [i for group in result["refund_groups"] for i in group["offer_ids"]]
+            wanted = {offer["id"] for offer in payload.get("offers", [])}
+            if len(seen) != len(set(seen)) or set(seen) != wanted:
+                return "refund_groups must contain every observed offer ID exactly once"
+    except ValueError as error:
+        return str(error)
+    return None
+
+
 class _NormalizingAPI:
-    """Thin pass-through: same accounting, but fixes sentence-valued codes."""
- 
+    """Pass-through to the supplied API (same accounting) that repairs known
+    interpretation slips: sentence-valued or mis-copied codes, a wrong hotel
+    evidence type, `item` used outside a quantifier. At most one extra repair
+    request is made, and only when a reply is structurally invalid."""
+
     def __init__(self, api):
         self._api = api
- 
+
     def __getattr__(self, name):
         return getattr(self._api, name)
- 
+
     def json(self, *args, **kwargs):
         result = self._api.json(*args, **kwargs)
         payload = args[2] if len(args) > 2 else kwargs.get("payload")
-        facts = result.get("facts") if isinstance(result, dict) else None
+        if not isinstance(result, dict) or not isinstance(payload, dict):
+            return result
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        facts = result.get("facts")
         if isinstance(facts, dict):
-            text = json.dumps(payload, ensure_ascii=False, default=str)
             if "consent" in facts:
-                facts["consent"] = _bare_code(facts["consent"], text)
-            if isinstance(facts.get("waiver"), dict) and "code" in facts["waiver"]:
-                facts["waiver"]["code"] = _bare_code(facts["waiver"]["code"], text)
+                facts["consent"] = _snap_code(facts["consent"], text)
+            if isinstance(facts.get("waiver"), dict):
+                _fix_waiver(facts["waiver"], payload, text)
+        for key in ("budget_limit", "arrival_deadline"):
+            if key in result:
+                result[key] = _unbind_item(result[key])
+        for group in result.get("refund_groups", []):
+            group["retained"] = _unbind_item(group["retained"])
+        problem = _reply_problem(result, payload)
+        if problem and len(args) >= 5:
+            note = ("\nREPAIR: your previous reply was rejected: " + problem +
+                    ". Return the complete corrected reply for the same schema.")
+            retry = self._api.json(args[0], args[1] + note, *args[2:])
+            if isinstance(retry, dict):
+                if isinstance(retry.get("facts"), dict):
+                    if "consent" in retry["facts"]:
+                        retry["facts"]["consent"] = _snap_code(retry["facts"]["consent"], text)
+                    if isinstance(retry["facts"].get("waiver"), dict):
+                        _fix_waiver(retry["facts"]["waiver"], payload, text)
+                for key in ("budget_limit", "arrival_deadline"):
+                    if key in retry:
+                        retry[key] = _unbind_item(retry[key])
+                for group in retry.get("refund_groups", []):
+                    group["retained"] = _unbind_item(group["retained"])
+                if _reply_problem(retry, payload) is None:
+                    return retry
         return result
- 
- 
+
+
 def solve(world, api, config, route_fn):
     """Retain the supplied agent, or implement your own observed-information loop.
- 
+
     The delegate already owns episode-local document, trip-state, routing and
     search caches. Replace this body for a custom memory format or update policy;
     keep helper functions/classes in this file and initialize memory inside solve.

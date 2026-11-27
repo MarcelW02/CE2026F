@@ -6,7 +6,11 @@ PROJECT_PROMPT = (
     "Help the traveler repair the trip. Use the available tools, then stop when done. "
     "FORMAT RULE: facts.consent and facts.waiver.code must each be ONLY the bare literal code "
     "token copied from the observed text (one word, no spaces), e.g. 'consent-123456' or "
-    "'proof-123456'. Never copy the sentence around the code, such as 'covers the outbound...'."
+    "'proof-123456'. Never copy the sentence around the code, such as 'covers the outbound...'. "
+    "ARRIVAL RULE: the base deadline T1 applies to every ticket unless an exception condition is met. "
+    "Text like 'arrive by T1; I can accept T2 when C; that concession is withdrawn when D' compiles to "
+    "if (C and not D) then T2 else T1. Tickets outside C (other modes, other price ranges) keep the "
+    "stricter T1; never give the relaxed time to tickets that fail the stated condition."
 )
 ROLE_PROMPTS = deepcopy(FP_EXTRACTION_ROLE_PROMPTS)
 
