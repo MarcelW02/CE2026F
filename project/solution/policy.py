@@ -145,6 +145,55 @@ def _reply_problem(result, payload):
     return None
 
 
+_REPORT = re.compile(
+    r"Observed operating result at virtual minute (\d+): (flight|train|coach) delay (\d+) minutes\. "
+    r"This resolves the forecast; sheltered services are unchanged\.")
+_REPORT_NOTICE = re.compile(
+    r"The final operating report confirms an actual (\d+)-minute delay to exposed (flight|train|coach) services\. "
+    r"(?:Use this observed disruption when checking the existing booking\.|"
+    r"The warned major disruption has not occurred; use this observed outcome when checking the existing booking\.) "
+    r"Sheltered services retain their original arrival times\.")
+
+
+def _weather_shortcut(payload, last):
+    """Return the previous compiled contract with the realized delay filled in, without a model call.
+
+    Only for a standalone operating report: exactly one new weather notice, every other
+    source unchanged, the same offers, and both texts in the exact standard wording.
+    Anything else returns None and goes to the model as before."""
+    prev = payload.get("previous")
+    if last is None or not prev or not isinstance(prev.get("facts"), dict):
+        return None
+    notices, earlier = payload["observation"]["notices"], last["observation"]["notices"]
+    if len(notices) != len(earlier) + 1 or notices[:-1] != earlier or notices[-1]["kind"] != "weather_update":
+        return None
+    docs = {d["id"]: d for d in payload["documents"]}
+    forecast = docs.pop("weather-forecast", None)
+    before = {d["id"]: d for d in last["documents"]}
+    old_forecast = before.pop("weather-forecast", None)
+    if not forecast or not old_forecast or forecast["version"] <= old_forecast["version"] or docs != before:
+        return None
+    sources = payload["observation"].get("operational_sources")
+    if not sources or sources != last["observation"].get("operational_sources") \
+            or any(v.get("id") == "weather-forecast" for v in sources.values()):
+        return None
+    if {o["id"] for o in payload["offers"]} != set(prev["refund_terms"]) \
+            or any((o.get("refund_contract_source") or {}).get("id") == "weather-forecast" for o in payload["offers"]):
+        return None
+    report, notice = _REPORT.fullmatch(forecast["text"]), _REPORT_NOTICE.fullmatch(notices[-1]["text"])
+    if not report or not notice:
+        return None
+    minute, mode, delay = report.groups()
+    if int(minute) != notices[-1]["at"] or notice.groups() != (delay, mode):
+        return None
+    facts = json.loads(json.dumps(prev["facts"]))
+    facts["weather"][mode] = int(delay)
+    facts["forecasts"] = [row for row in facts["forecasts"] if row.get("mode") != mode]
+    return {"budget_limit": prev["budget_limit"], "arrival_deadline": prev["arrival_deadline"],
+            "refund_groups": [{"offer_ids": [i], "retained": e} for i, e in prev["refund_terms"].items()],
+            "facts": facts}
+
+
 class _NormalizingAPI:
     """Pass-through to the supplied API (same accounting) that repairs known
     interpretation slips: sentence-valued or mis-copied codes, a wrong hotel
@@ -153,6 +202,7 @@ class _NormalizingAPI:
 
     def __init__(self, api):
         self._api = api
+        self._last = None
 
     def __getattr__(self, name):
         return getattr(self._api, name)
@@ -172,8 +222,16 @@ class _NormalizingAPI:
                     args = (dict(args[0], effort="low"),) + tuple(args[1:])
 
     def json(self, *args, **kwargs):
-        result = self._call(*args, **kwargs)
         payload = args[2] if len(args) > 2 else kwargs.get("payload")
+        last, self._last = self._last, payload
+        if isinstance(payload, dict) and "observation" in payload:
+            try:
+                shortcut = _weather_shortcut(payload, last)
+            except (KeyError, TypeError, ValueError):
+                shortcut = None
+            if shortcut is not None:
+                return shortcut
+        result = self._call(*args, **kwargs)
         if not isinstance(result, dict) or not isinstance(payload, dict):
             return result
         text = json.dumps(payload, ensure_ascii=False, default=str)
